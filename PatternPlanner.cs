@@ -261,6 +261,61 @@ namespace ASWAutoHunt
             return new PlannedBuoy { Pos = Lateral(c, hdg, lateralNm), Tag = tag };
         }
 
+        // Straight barrier from a to b, buoys at BarrierSpacingNm along it (truncated at the far end if the buoys run out).
+        public static List<PlannedBuoy> Line(GeoPosition a, GeoPosition b, string ammoFile, int maxBuoys)
+        {
+            List<PlannedBuoy> res = new List<PlannedBuoy>();
+            float len = DistNm(a, b);
+            float sp = BarrierSpacingNm(ammoFile);
+            float hdg = a.HeadingToPosition(b);
+            int n = Math.Min(maxBuoys, (int)Math.Floor(len / sp) + 1);
+            for (int i = 0; i < n; i++)
+            {
+                res.Add(new PlannedBuoy { Pos = a.GeoOffsetByDistanceOnHeading(i * sp, hdg), Tag = "B" });
+            }
+
+            return res;
+        }
+
+        // Ring of radius radiusNm around a datum: outer ring at barrier spacing (stretched if the buoys cannot cover it),
+        // then concentric infill rings stepped inwards at hex row spacing, then a centre buoy if the middle is still open.
+        public static List<PlannedBuoy> Ring(GeoPosition centre, float radiusNm, string ammoFile, int maxBuoys)
+        {
+            List<PlannedBuoy> res = new List<PlannedBuoy>();
+            if (maxBuoys < 3 || radiusNm < 1f) return res;
+            float sp = BarrierSpacingNm(ammoFile);
+            float step = HexSpacingNm(ammoFile) * 0.866f;
+            float r = radiusNm;
+            bool outer = true;
+            float startAngle = 0f;
+            while (r > step * 0.6f && res.Count < maxBuoys)
+            {
+                int n = Math.Max(3, (int)Math.Ceiling(2f * Math.PI * r / (outer ? sp : HexSpacingNm(ammoFile))));
+                if (res.Count + n > maxBuoys)
+                {
+                    if (outer) n = maxBuoys; // stretch the outer ring rather than leave it open
+                    else break;
+                }
+
+                for (int i = 0; i < n; i++)
+                {
+                    float ang = startAngle + i * 360f / n;
+                    res.Add(new PlannedBuoy { Pos = centre.GeoOffsetByDistanceOnHeading(r, ang), Tag = outer ? "O" : "I" });
+                }
+
+                outer = false;
+                startAngle += 180f / Math.Max(3, res.Count); // small stagger between rings
+                r -= step;
+            }
+
+            if (r >= 0f && r < step * 0.6f && !outer && res.Count < maxBuoys && radiusNm > step)
+            {
+                res.Add(new PlannedBuoy { Pos = centre, Tag = "C" });
+            }
+
+            return res;
+        }
+
         // Fly the pattern from whichever end is closer to the aircraft.
         public static void OrientFor(List<PlannedBuoy> pattern, GeoPosition from)
         {

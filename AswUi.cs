@@ -10,7 +10,7 @@ using UnityEngine;
 
 namespace ASWAutoHunt
 {
-    public enum PatternKind { GridDatum, GridRoute, Corridor }
+    public enum PatternKind { GridDatum, GridRoute, Corridor, Ring, Line }
 
     // Builds a pattern, draws it on the map's drawing layer (one marker per buoy) and queues the drops on the aircraft
     // with the game's own "attack at waypoint" tasks, so flight, release and bookkeeping are all native behaviour.
@@ -79,7 +79,7 @@ namespace ASWAutoHunt
             return new PatternPlanner.Route(pts);
         }
 
-        public static void Assign(ObjectBase src, PatternKind kind, float widthNm, GeoPosition datum, ObjectBase fleet, float gridHeading = 90f)
+        public static void Assign(ObjectBase src, PatternKind kind, float widthNm, GeoPosition datum, ObjectBase fleet, float gridHeading = 90f, GeoPosition? second = null)
         {
             try
             {
@@ -95,6 +95,14 @@ namespace ASWAutoHunt
                 if (kind == PatternKind.GridDatum)
                 {
                     pattern = PatternPlanner.GridAtDatum(datum, ammo, budget, gridHeading);
+                }
+                else if (kind == PatternKind.Ring)
+                {
+                    pattern = PatternPlanner.Ring(datum, PatternPlanner.DistNm(datum, second ?? datum), ammo, budget);
+                }
+                else if (kind == PatternKind.Line)
+                {
+                    pattern = PatternPlanner.Line(datum, second ?? datum, ammo, budget);
                 }
                 else
                 {
@@ -138,8 +146,10 @@ namespace ASWAutoHunt
                 }
 
                 Plans[src] = plan;
-                string desc = kind == PatternKind.Corridor ? $"corridor {widthNm:0} nm wide" : kind == PatternKind.GridRoute ? "grid along route" : "grid at datum";
-                src.ShowOrderFeedback($"ASW pattern: {desc}, {pattern.Count} buoys, spacing {(kind == PatternKind.Corridor ? PatternPlanner.BarrierSpacingNm(ammo) : PatternPlanner.HexSpacingNm(ammo)):0.0} nm");
+                string desc = kind == PatternKind.Corridor ? $"corridor {widthNm:0} nm wide" : kind == PatternKind.GridRoute ? "grid along route"
+                    : kind == PatternKind.Ring ? "ring with infill" : kind == PatternKind.Line ? "straight line" : "grid at datum";
+                bool barrier = kind == PatternKind.Corridor || kind == PatternKind.Line;
+                src.ShowOrderFeedback($"ASW pattern: {desc}, {pattern.Count} buoys, spacing {(barrier ? PatternPlanner.BarrierSpacingNm(ammo) : PatternPlanner.HexSpacingNm(ammo)):0.0} nm");
                 ModLog.Event($"ASW pattern assigned: {src.getUIDAndName()} {desc} buoys={pattern.Count}/{have} ammo={ammo}");
             }
             catch (Exception ex)
@@ -225,13 +235,15 @@ namespace ASWAutoHunt
             _width = widthNm;
         }
 
-        private bool NeedsShip => _kind != PatternKind.GridDatum;
+        private bool TwoClick => _kind == PatternKind.GridDatum || _kind == PatternKind.Ring || _kind == PatternKind.Line;
+        private bool NeedsShip => !TwoClick;
 
         // Datum grid is two clicks: centre, then a second point that sets the row direction (rubber-band line shown between).
         private GeoPosition? _centre;
         private MarkerDrawing _centreMarker;
         private MarkerDrawing _endMarker;
         private RingDrawing _ring;
+        private RulerDrawing _ruler;
 
         public override void OnExit()
         {
@@ -244,6 +256,8 @@ namespace ASWAutoHunt
             MapDrawingLayer layer = Globals._mainGameViewModel?.Map?.DrawingLayer;
             if (layer == null) return;
             if (_ring != null) layer.Graphics.Remove(_ring);
+            if (_ruler != null) layer.Graphics.Remove(_ruler);
+            _ruler = null;
             if (_centreMarker != null) layer.Graphics.Remove(_centreMarker);
             if (_endMarker != null) layer.Graphics.Remove(_endMarker);
             _ring = null;
@@ -257,10 +271,18 @@ namespace ASWAutoHunt
             if (layer == null) return;
             _centreMarker = new MarkerDrawing { Location = centre };
             _endMarker = new MarkerDrawing { Location = centre };
-            _ring = new RingDrawing { Center = _centreMarker, Extremis = _endMarker };
             layer.Graphics.Add(_centreMarker);
             layer.Graphics.Add(_endMarker);
-            layer.Graphics.Add(_ring);
+            if (_kind == PatternKind.Line)
+            {
+                _ruler = new RulerDrawing { Start = _centreMarker, End = _endMarker };
+                layer.Graphics.Add(_ruler);
+            }
+            else
+            {
+                _ring = new RingDrawing { Center = _centreMarker, Extremis = _endMarker };
+                layer.Graphics.Add(_ring);
+            }
         }
 
         private static ObjectBase PickShip(object v)
@@ -275,18 +297,20 @@ namespace ASWAutoHunt
             {
                 if (e.RightButton == Noesis.MouseButtonState.Pressed)
                 {
-                    if (_kind == PatternKind.GridDatum)
+                    if (TwoClick)
                     {
                         if (_centre == null)
                         {
                             _centre = mousePosition;
                             StartPreview(mousePosition);
-                            _source?.ShowOrderFeedback("Right-click again to set the grid direction (middle-click cancels)");
+                            _source?.ShowOrderFeedback(_kind == PatternKind.GridDatum ? "Right-click again to set the grid direction (middle-click cancels)"
+                                : _kind == PatternKind.Ring ? "Right-click again to set the ring radius (middle-click cancels)"
+                                : "Right-click the end of the line (middle-click cancels)");
                         }
                         else
                         {
                             float heading = _centre.Value.HeadingToPosition(mousePosition);
-                            AswPlanner.Assign(_source, _kind, _width, _centre.Value, null, heading);
+                            AswPlanner.Assign(_source, _kind, _width, _centre.Value, null, heading, mousePosition);
                             _manager.PopState<AswPickState>();
                         }
 
@@ -324,6 +348,7 @@ namespace ASWAutoHunt
             {
                 _endMarker.Location = mousePosition;
                 _ring?.Update();
+                _ruler?.Update();
             }
 
             return base.MouseAction(v, args, mousePosition, map, ref handled);
@@ -332,7 +357,8 @@ namespace ASWAutoHunt
         public static void Begin(ObjectBase src, PatternKind kind, float widthNm)
         {
             if (src == null || src.IsDestroyed) return;
-            src.ShowOrderFeedback(kind == PatternKind.GridDatum ? "Right-click the datum (grid centre)" : "Right-click the fleet ship whose route to screen");
+            src.ShowOrderFeedback(kind == PatternKind.GridDatum || kind == PatternKind.Ring ? "Right-click the pattern centre"
+                : kind == PatternKind.Line ? "Right-click the start of the line" : "Right-click the fleet ship whose route to screen");
             InteractionStateManager mgr = Globals._mainGameViewModel.StateManager;
             mgr.PushSingleState(new AswPickState(mgr, src, kind, widthNm));
         }
@@ -362,7 +388,9 @@ namespace ASWAutoHunt
                     TrulyObservableCollection<ContextMenuItem> sub = new TrulyObservableCollection<ContextMenuItem>
                     {
                         new ContextMenuItem("Grid at datum", null, new DelegateCommand(_ => AswPickState.Begin(o, PatternKind.GridDatum, 0f))),
-                        new ContextMenuItem("Grid along fleet route", null, new DelegateCommand(_ => AswPickState.Begin(o, PatternKind.GridRoute, 0f)))
+                        new ContextMenuItem("Grid along fleet route", null, new DelegateCommand(_ => AswPickState.Begin(o, PatternKind.GridRoute, 0f))),
+                        new ContextMenuItem("Ring with infill", null, new DelegateCommand(_ => AswPickState.Begin(o, PatternKind.Ring, 0f))),
+                        new ContextMenuItem("Straight line", null, new DelegateCommand(_ => AswPickState.Begin(o, PatternKind.Line, 0f)))
                     };
                     foreach (float w in CorridorWidths)
                     {
