@@ -424,15 +424,24 @@ namespace ASWAutoHunt
         {
             try
             {
-                if (o.Formation != null && o.Formation == src.Formation) return;
-                if (!UnitFormation.CheckFormationJoin(src, o)) return;
-                if (src.Formation == null)
+                // Anchor: src if the game lets o join it, otherwise a same-class unit already in the group
+                // (e.g. the first helicopter, since helicopters cannot join a fixed-wing formation).
+                ObjectBase anchor = null;
+                foreach (ObjectBase c in new[] { src }.Concat(PartnersOf(src)))
                 {
-                    src.Formation = new UnitFormation(new UnitFormationParameters(src._type == ObjectBase.ObjectType.Aircraft) { _leaderObject = src });
+                    if (c == o) continue;
+                    if (o.Formation != null && o.Formation == c.Formation) return;
+                    if (anchor == null && UnitFormation.CheckFormationJoin(c, o)) anchor = c;
                 }
 
-                src.Formation.AddUnit(o);
-                ModLog.Event($"ASW: {o.getUIDAndName()} added to formation of {src.getUIDAndName()}");
+                if (anchor == null) return;
+                if (anchor.Formation == null)
+                {
+                    anchor.Formation = new UnitFormation(new UnitFormationParameters(anchor._type == ObjectBase.ObjectType.Aircraft) { _leaderObject = anchor });
+                }
+
+                anchor.Formation.AddUnit(o);
+                ModLog.Event($"ASW: {o.getUIDAndName()} added to formation of {anchor.getUIDAndName()}");
             }
             catch (Exception ex)
             {
