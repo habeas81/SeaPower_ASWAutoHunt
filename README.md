@@ -1,18 +1,57 @@
-# Sea Power: ASW Auto Hunt
+# Sea Power: ASW Find, Fix and Prosecute
 
-Aerial anti-submarine helper for *Sea Power: Naval Combat in the Missile Age* (aircraft and helicopters).
+Airborne anti-submarine automation for *Sea Power: Naval Combat in the Missile Age*. Pick a pattern, click the map, and your aircraft and helicopters lay out and drop a full sonobuoy field for you, efficiently and without gaps. Share the job with other aircraft and the mod splits the buoys between them.
 
-**Status: scaffold only (v0.1.0).** It loads through Anchor Chain and logs; no features yet.
+**Status: beta.** The pattern and coordination features below are playable. Automated contact response (fix and prosecute) is in development.
 
-## Planned
+## Description
 
-1. **Buoy pattern planner (first release):** a map overlay showing an optimum sonobuoy layout (line barrier, grid, circle/datum) around a point or contact, sized from the buoy type's detection range.
-2. **Drop the pattern:** assign the pattern to the selected aircraft/helicopter; it flies the track and releases buoys at each point using the game's own `DropSonobuoy` engage task.
-3. **Later:** right-click *Automate ASW Hunting* near friendly ships or a map mark (search, localise, attack).
+Laying a good sonobuoy field by hand means a lot of shift-right-clicking, guesswork on spacing, and aircraft wasting fuel zig-zagging over the same water. ASW Find, Fix and Prosecute does the planning. You choose the pattern and where it goes; the mod works out buoy positions from the actual detection range of the buoys aboard, orders the drops so the aircraft flies an efficient track, and queues them using the game's own sonobuoy drop order.
+
+Need more aircraft on the job? Tick "Share with..." and the mod puts them in one formation, then recomputes the whole layout from where each aircraft really is, so nearer buoys go to the aircraft that can reach them soonest. Fixed-wing aircraft and helicopters can work the same pattern together.
+
+## Features
+
+**Patterns**
+- **Grid at datum:** hex grid centred on a clicked point, rotatable with a second click.
+- **Grid along fleet route:** a grid laid along a friendly ship's planned route.
+- **Corridor:** a screen of a chosen width (20 to 100 nm) along a ship's route. The perimeter is flown first, then the fill.
+- **Ring with infill:** a ring of buoys around a datum, with the interior filled in.
+- **Straight line:** a barrier line between two clicked points.
+
+**Smart layout**
+- Spacing is derived from each buoy type's detection range (DIFAR, DICASS, VLAD), not a fixed number.
+- Buoys already in the water, or already queued by another aircraft, are detected and not duplicated.
+- Drop order is optimised (nearest-neighbour plus 2-opt) so the aircraft does not fly over a later drop point on its way to an earlier one.
+- Mixed buoy loads are handled: the pattern is laid out for the shortest-range buoy, and points that longer-range buoys already cover are thinned out.
+
+**Multi-aircraft coordination**
+- Share a pattern with other aircraft from the menu. Sharing adds them to the lead aircraft's formation (same-type aircraft in one formation).
+- Fixed-wing and helicopters can work one pattern together; they stay in separate formations but share the layout.
+- Buoys are split by each aircraft's real position, speed and buoy count, and a rebalance pass moves points so everyone finishes at about the same time.
+- Add or remove an aircraft mid-pattern and the layout is recomputed. Buoys already placed are kept and skipped.
+
+**Convenience**
+- "ASW Pattern" on the first level of the right-click menu for flying units that carry sonobuoys.
+- "ASW" button on the bottom bar: left-click repeats the last pattern type, and the menu is available from there too.
+- **Resume buoy deployment** if an accidental waypoint wipes the queue.
+- Map markers for queued buoys, removed as they are dropped.
+- A detailed log (`BepInEx\ASWAutoHunt.log`) of every planned and dropped buoy, to help with tuning and bug reports.
+
+**Planned**
+- Automatic response to submarine contacts: fix with a tight cluster of active DICASS buoys, then prosecute with torpedoes or depth charges (with player confirmation unless weapons are free).
+- Ship evasion and torpedo defence.
+- Dipping sonar patterns for helicopters.
 
 ## Requirements
 
-- Sea Power 0.8.7+, [Anchor Chain](https://steamcommunity.com/sharedfiles/filedetails/?id=3380210757) with BepInEx 5.4.x, .NET SDK 10 to build.
+- Sea Power 0.8.7+, [Anchor Chain](https://steamcommunity.com/sharedfiles/filedetails/?id=3380210757) with BepInEx 5.4.x. Enable both in the in-game Mods menu and restart the game.
+- .NET SDK 10 to build from source.
+
+## Known issues
+
+- Beta: please report bugs with `ASWAutoHunt.log` attached.
+- Resume counts buoys dropped by hand during an interruption as part of the pattern.
 
 ## Building
 
