@@ -79,7 +79,7 @@ namespace ASWAutoHunt
             return new PatternPlanner.Route(pts);
         }
 
-        public static void Assign(ObjectBase src, PatternKind kind, float widthNm, GeoPosition datum, ObjectBase fleet)
+        public static void Assign(ObjectBase src, PatternKind kind, float widthNm, GeoPosition datum, ObjectBase fleet, float gridHeading = 90f)
         {
             try
             {
@@ -94,7 +94,7 @@ namespace ASWAutoHunt
                 List<PlannedBuoy> pattern;
                 if (kind == PatternKind.GridDatum)
                 {
-                    pattern = PatternPlanner.GridAtDatum(datum, ammo, budget);
+                    pattern = PatternPlanner.GridAtDatum(datum, ammo, budget, gridHeading);
                 }
                 else
                 {
@@ -227,6 +227,42 @@ namespace ASWAutoHunt
 
         private bool NeedsShip => _kind != PatternKind.GridDatum;
 
+        // Datum grid is two clicks: centre, then a second point that sets the row direction (rubber-band line shown between).
+        private GeoPosition? _centre;
+        private MarkerDrawing _centreMarker;
+        private MarkerDrawing _endMarker;
+        private RulerDrawing _ruler;
+
+        public override void OnExit()
+        {
+            ClearPreview();
+            base.OnExit();
+        }
+
+        private void ClearPreview()
+        {
+            MapDrawingLayer layer = Globals._mainGameViewModel?.Map?.DrawingLayer;
+            if (layer == null) return;
+            if (_ruler != null) layer.Graphics.Remove(_ruler);
+            if (_centreMarker != null) layer.Graphics.Remove(_centreMarker);
+            if (_endMarker != null) layer.Graphics.Remove(_endMarker);
+            _ruler = null;
+            _centreMarker = null;
+            _endMarker = null;
+        }
+
+        private void StartPreview(GeoPosition centre)
+        {
+            MapDrawingLayer layer = Globals._mainGameViewModel?.Map?.DrawingLayer;
+            if (layer == null) return;
+            _centreMarker = new MarkerDrawing { Location = centre };
+            _endMarker = new MarkerDrawing { Location = centre };
+            _ruler = new RulerDrawing { Start = _centreMarker, End = _endMarker };
+            layer.Graphics.Add(_centreMarker);
+            layer.Graphics.Add(_endMarker);
+            layer.Graphics.Add(_ruler);
+        }
+
         private static ObjectBase PickShip(object v)
         {
             ObjectBase o = (v as MapUnitViewModel)?.Unit?.BaseObject;
@@ -239,8 +275,27 @@ namespace ASWAutoHunt
             {
                 if (e.RightButton == Noesis.MouseButtonState.Pressed)
                 {
+                    if (_kind == PatternKind.GridDatum)
+                    {
+                        if (_centre == null)
+                        {
+                            _centre = mousePosition;
+                            StartPreview(mousePosition);
+                            _source?.ShowOrderFeedback("Right-click again to set the grid direction (middle-click cancels)");
+                        }
+                        else
+                        {
+                            float heading = _centre.Value.HeadingToPosition(mousePosition);
+                            AswPlanner.Assign(_source, _kind, _width, _centre.Value, null, heading);
+                            _manager.PopState<AswPickState>();
+                        }
+
+                        handled = true;
+                        return Noesis.HitTestResultBehavior.Stop;
+                    }
+
                     ObjectBase ship = PickShip(v);
-                    if (NeedsShip && ship == null)
+                    if (ship == null)
                     {
                         _source?.ShowOrderFeedback("Right-click a friendly ship (its route is screened)");
                     }
@@ -265,6 +320,11 @@ namespace ASWAutoHunt
             {
                 CursorName = PickShip(v) != null ? "identify" : "unavailable";
             }
+            else if (_endMarker != null)
+            {
+                _endMarker.Location = mousePosition;
+                _ruler?.Update();
+            }
 
             return base.MouseAction(v, args, mousePosition, map, ref handled);
         }
@@ -272,7 +332,7 @@ namespace ASWAutoHunt
         public static void Begin(ObjectBase src, PatternKind kind, float widthNm)
         {
             if (src == null || src.IsDestroyed) return;
-            src.ShowOrderFeedback(kind == PatternKind.GridDatum ? "Right-click the datum" : "Right-click the fleet ship whose route to screen");
+            src.ShowOrderFeedback(kind == PatternKind.GridDatum ? "Right-click the datum (grid centre)" : "Right-click the fleet ship whose route to screen");
             InteractionStateManager mgr = Globals._mainGameViewModel.StateManager;
             mgr.PushSingleState(new AswPickState(mgr, src, kind, widthNm));
         }

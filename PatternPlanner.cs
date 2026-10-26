@@ -119,8 +119,9 @@ namespace ASWAutoHunt
                 : p.GeoOffsetByDistanceOnHeading(-offsetNm, heading - 90f);
         }
 
-        // Hexagonal area grid centred on a datum, north-aligned, up to maxBuoys points, flown row by row (boustrophedon).
-        public static List<PlannedBuoy> GridAtDatum(GeoPosition datum, string ammoFile, int maxBuoys)
+        // Hexagonal area grid centred on a datum, up to maxBuoys points, flown row by row (boustrophedon). Rows run along
+        // rowHeading (default 90 = east-west rows, north-aligned grid) and stack to the left of that heading.
+        public static List<PlannedBuoy> GridAtDatum(GeoPosition datum, string ammoFile, int maxBuoys, float rowHeading = 90f)
         {
             List<PlannedBuoy> res = new List<PlannedBuoy>();
             if (maxBuoys < 1) return res;
@@ -130,14 +131,14 @@ namespace ASWAutoHunt
             int rows = (int)Math.Ceiling(maxBuoys / (double)cols);
             for (int r = 0; r < rows && res.Count < maxBuoys; r++)
             {
-                float north = (r - (rows - 1) / 2f) * rowStep;
+                float stack = (r - (rows - 1) / 2f) * rowStep;
                 float shift = (r % 2 == 1) ? d / 2f : 0f;
                 for (int c = 0; c < cols && res.Count < maxBuoys; c++)
                 {
                     int cc = (r % 2 == 0) ? c : cols - 1 - c;
-                    float east = (cc - (cols - 1) / 2f) * d + shift - d / 4f;
-                    GeoPosition p = datum.GeoOffsetByDistanceOnHeading(Math.Abs(north), north >= 0f ? 0f : 180f)
-                        .GeoOffsetByDistanceOnHeading(Math.Abs(east), east >= 0f ? 90f : 270f);
+                    float along = (cc - (cols - 1) / 2f) * d + shift - d / 4f;
+                    GeoPosition p = Lateral(datum.GeoOffsetByDistanceOnHeading(Math.Abs(along), along >= 0f ? rowHeading : rowHeading + 180f),
+                        rowHeading, -stack);
                     res.Add(new PlannedBuoy { Pos = p, Tag = "G" });
                 }
             }
