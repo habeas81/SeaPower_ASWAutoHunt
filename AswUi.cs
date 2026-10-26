@@ -16,7 +16,7 @@ namespace ASWAutoHunt
     // with the game's own "attack at waypoint" tasks, so flight, release and bookkeeping are all native behaviour.
     public static class AswPlanner
     {
-        public const float ProgressCheckSec = 3f;
+        public const float ProgressCheckSec = 1f;
         public const int MaxBuoysPerPattern = 120;
 
         private sealed class Plan
@@ -25,6 +25,9 @@ namespace ASWAutoHunt
             public int Total;
             public readonly List<MarkerDrawing> Markers = new List<MarkerDrawing>();
             public readonly List<GeoPosition> Points = new List<GeoPosition>(); // undropped points, in drop order
+            public readonly List<string> Tags = new List<string>();             // parallel to Points (L/R/C/E/G...)
+            public int Dropped;                                                 // buoys logged as dropped so far
+            public GeoPosition LastPos;                                         // previous drop, for leg length
             public int StartAmmo;       // buoys aboard when the (re)queue happened
             public bool Interrupted;    // queue was wiped (e.g. manual waypoint) before the pattern finished
             public float NextCheck;
@@ -83,6 +86,7 @@ namespace ASWAutoHunt
                 while (plan.Points.Count > count)
                 {
                     plan.Points.RemoveAt(plan.Points.Count - 1);
+                    plan.Tags.RemoveAt(plan.Tags.Count - 1);
                     DrawingLayerOf()?.Graphics.Remove(plan.Markers[plan.Markers.Count - 1]);
                     plan.Markers.RemoveAt(plan.Markers.Count - 1);
                 }
@@ -204,8 +208,25 @@ namespace ASWAutoHunt
                 Cancel(src, silent: true);
 
                 Plan plan = new Plan { Ammo = ammo, Total = pattern.Count };
-                foreach (PlannedBuoy b in pattern) plan.Points.Add(b.Pos);
+                plan.LastPos = src._geoPosition;
+                foreach (PlannedBuoy b in pattern)
+                {
+                    plan.Points.Add(b.Pos);
+                    plan.Tags.Add(b.Tag);
+                }
+
                 QueueDrops(src, plan, plan.Points.Count);
+                // Full planned order with leg lengths, to review pattern efficiency.
+                GeoPosition prev = src._geoPosition;
+                float total = 0f;
+                for (int i = 0; i < pattern.Count; i++)
+                {
+                    float leg = PatternPlanner.DistNm(prev, pattern[i].Pos);
+                    total += leg;
+                    ModLog.Event($"  plan {src.getUIDAndName()} #{i + 1} {pattern[i].Tag} leg={leg:0.0}nm cum={total:0.0}nm lat={pattern[i].Pos._latitude:0.000} lon={pattern[i].Pos._longitude:0.000}");
+                    prev = pattern[i].Pos;
+                }
+
                 foreach (PlannedBuoy b in pattern)
                 {
                     MarkerDrawing m = new MarkerDrawing { Location = b.Pos };
@@ -316,6 +337,23 @@ namespace ASWAutoHunt
             }
         }
 
+        // Logs and removes the first n points as dropped (detected within ProgressCheckSec of the release).
+        private static void LogDrops(ObjectBase o, Plan plan, int n)
+        {
+            n = Math.Min(n, plan.Points.Count);
+            for (int i = 0; i < n; i++)
+            {
+                GeoPosition p = plan.Points[i];
+                float leg = PatternPlanner.DistNm(plan.LastPos, p);
+                plan.Dropped++;
+                ModLog.Event($"  drop {o.getUIDAndName()} #{plan.Dropped} {plan.Tags[i]} leg={leg:0.0}nm acft_to_point={PatternPlanner.DistNm(o._geoPosition, p):0.0}nm lat={p._latitude:0.000} lon={p._longitude:0.000}");
+                plan.LastPos = p;
+            }
+
+            plan.Points.RemoveRange(0, n);
+            plan.Tags.RemoveRange(0, n);
+        }
+
         private static MapDrawingLayer DrawingLayerOf() => Globals._mainGameViewModel?.Map?.DrawingLayer;
 
         private static void ClearMarkers(Plan plan, int count)
@@ -363,12 +401,14 @@ namespace ASWAutoHunt
                     int used = plan.StartAmmo - o.getAmmunitionAmountByName(plan.Ammo);
                     if (used >= plan.Points.Count)
                     {
+                        LogDrops(o, plan, plan.Points.Count);
+                        ModLog.Event($"ASW pattern complete: {o.getUIDAndName()} dropped={plan.Dropped}");
                         ClearMarkers(plan, plan.Markers.Count);
                         Plans.Remove(o);
                         return;
                     }
 
-                    plan.Points.RemoveRange(0, Math.Max(0, used));
+                    LogDrops(o, plan, Math.Max(0, used));
                     ClearMarkers(plan, Math.Max(0, plan.Markers.Count - plan.Points.Count));
                     plan.Interrupted = true;
                     o.ShowOrderFeedback($"ASW pattern interrupted, {plan.Points.Count} buoys unplaced (Orders > ASW Pattern > Resume)");
@@ -381,7 +421,7 @@ namespace ASWAutoHunt
                 if (toClear > 0)
                 {
                     int done = plan.Points.Count - remaining;
-                    plan.Points.RemoveRange(0, Math.Min(done, plan.Points.Count));
+                    LogDrops(o, plan, done);
                     ClearMarkers(plan, toClear);
                 }
             }
