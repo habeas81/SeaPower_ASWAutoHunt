@@ -179,6 +179,13 @@ namespace ASWAutoHunt
 
                 budget = Math.Min(budget, MaxBuoysPerPattern * group.Count);
                 ClearPartners(src);
+
+                // Lay the pattern out for the shortest-range buoy in the group so coverage holds whichever aircraft
+                // places each point; longer-range buoys are used to thin points they already cover (see ThinForRange).
+                foreach (string a in ammos)
+                {
+                    if (PatternPlanner.EffectiveRadiusNm(a) < PatternPlanner.EffectiveRadiusNm(ammo)) ammo = a;
+                }
                 List<PlannedBuoy> pattern;
                 if (kind == PatternKind.GridDatum)
                 {
@@ -246,6 +253,12 @@ namespace ASWAutoHunt
                     }
 
                     shares = PatternPlanner.Split(pattern, carriers);
+                    int thinned = ThinForRange(shares, ammos);
+                    if (thinned > 0)
+                    {
+                        ModLog.Event($"  coordination: {thinned} points thinned (covered by longer-range buoys in the group)");
+                        skipped += thinned;
+                    }
                 }
 
                 for (int i = 0; i < group.Count; i++)
@@ -349,6 +362,38 @@ namespace ASWAutoHunt
             public readonly GeoPosition Pos;
             public readonly float RadiusNm;
             public CoverageSource(GeoPosition pos, float radiusNm) { Pos = pos; RadiusNm = radiusNm; }
+        }
+
+        // Mixed buoy types: the pattern was laid out for the shortest-range buoy. Going from the longest-range owner down,
+        // drop any point already covered by a kept point (same overlap rule as deconfliction, using each buoy's own
+        // radius), so long-range buoys space out naturally and short-range ones fill only what is left uncovered.
+        private static int ThinForRange(List<List<PlannedBuoy>> shares, List<string> ammos)
+        {
+            float rMin = ammos.Min(PatternPlanner.EffectiveRadiusNm), rMax = ammos.Max(PatternPlanner.EffectiveRadiusNm);
+            if (rMax - rMin < 0.01f) return 0;
+
+            List<CoverageSource> kept = new List<CoverageSource>();
+            int removed = 0;
+            foreach (int i in Enumerable.Range(0, shares.Count).OrderByDescending(k => PatternPlanner.EffectiveRadiusNm(ammos[k])))
+            {
+                float r = PatternPlanner.EffectiveRadiusNm(ammos[i]);
+                List<PlannedBuoy> keep = new List<PlannedBuoy>();
+                foreach (PlannedBuoy p in shares[i])
+                {
+                    if (kept.Any(q => PatternPlanner.DistNm(p.Pos, q.Pos) < OverlapFactor * (r + q.RadiusNm)))
+                    {
+                        removed++;
+                        continue;
+                    }
+
+                    keep.Add(p);
+                    kept.Add(new CoverageSource(p.Pos, r));
+                }
+
+                shares[i] = keep;
+            }
+
+            return removed;
         }
 
         // ---- Deconfliction ----
