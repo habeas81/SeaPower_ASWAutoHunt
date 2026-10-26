@@ -238,18 +238,23 @@ namespace ASWAutoHunt
             {
                 int last = Math.Min(first + perChunk, stations) - 1;
                 for (int st = first; st <= last; st++) res.Add(Station(route, st, sp, -half, "L"));
+
+                // On the final chunk the end cap is the cross-leg of the perimeter (left wall -> cap -> right wall),
+                // so the whole perimeter is flown before any infill.
+                if (last == stations - 1)
+                {
+                    for (int i = 1; i <= capN; i++)
+                    {
+                        float lat = -half + i * (widthNm / (capN + 1));
+                        res.Add(Station(route, stations, sp, lat, "E"));
+                    }
+                }
+
                 for (int st = last; st >= first; st--) res.Add(Station(route, st, sp, half, "R"));
                 for (int st = first; st <= last; st++)
                 {
                     if ((st % CorridorCentrelineEvery) == 0) res.Add(Station(route, st, sp, 0f, "C"));
                 }
-            }
-
-            // End cap across the far end, flown from the middle outwards then back.
-            for (int i = 1; i <= capN; i++)
-            {
-                float lat = -half + i * (widthNm / (capN + 1));
-                res.Add(Station(route, stations, sp, lat, "E"));
             }
 
             return res;
