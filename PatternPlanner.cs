@@ -34,6 +34,8 @@ namespace ASWAutoHunt
         public const float CorridorLengthNm = 80f;        // maximum length of the screen; shortened to fit the buoys carried
         public const int CorridorCentrelineEvery = 2;     // centreline buoy at every Nth station (sparser than the walls)
         public const bool CorridorEndCap = true;
+        public const float MaxChunkNm = 40f;              // longest single chunk along the track
+        public const int Chunks = 3;                      // patterns are flown in thirds (wall, cross, wall, interior)
         public const float CorridorMinWidthNm = 20f;
         public const float CorridorMaxWidthNm = 100f;
         public const float MaxLegSearchNm = 400f;         // safety cap on route length scanned
@@ -143,34 +145,65 @@ namespace ASWAutoHunt
             return res;
         }
 
-        // Hexagonal swath centred on the route, starting GridLeadNm ahead of the fleet. Built station by station so running
-        // out of buoys shortens the far end rather than leaving holes.
+        // Stations per chunk: thirds of the pattern, but no chunk longer than MaxChunkNm along the track.
+        private static int ChunkSize(int stations, float stationSpacingNm)
+        {
+            int perChunk = (int)Math.Ceiling(stations / (double)Math.Min(Chunks, stations));
+            return Math.Max(1, Math.Min(perChunk, (int)Math.Floor(MaxChunkNm / stationSpacingNm)));
+        }
+
+        // Hexagonal swath centred on the route, starting GridLeadNm ahead of the fleet. Running out of buoys shortens the
+        // far end rather than leaving holes. Flown in chunks like the corridor: up the left edge, across, down the right
+        // edge, then back and forth through the interior lines before moving on to the next chunk.
         public static List<PlannedBuoy> GridAlongRoute(Route route, string ammoFile, int maxBuoys)
         {
             List<PlannedBuoy> res = new List<PlannedBuoy>();
             if (!route.Valid || maxBuoys < 1) return res;
             float d = HexSpacingNm(ammoFile);
             float rowStep = d * 0.866f;
+            float stepNm = d / 2f; // half-spacing steps so alternate lines stagger
             int lines = Math.Max(2, (int)Math.Floor(2f * GridRouteHalfWidthNm / rowStep) + 1);
-            for (int st = 0; res.Count + lines <= maxBuoys; st++)
-            {
-                float s = GridLeadNm + st * d / 2f; // half-spacing steps so alternate lines stagger
-                route.At(s, out GeoPosition c, out float hdg);
-                bool zig = (st % 2) == 1;
-                for (int k = 0; k < lines; k++)
-                {
-                    int kk = zig ? lines - 1 - k : k;
-                    // only every other line is occupied at a given station -> staggered hex lattice
-                    if (((kk + st) & 1) != 0) continue;
-                    float lat = (kk - (lines - 1) / 2f) * rowStep;
-                    res.Add(new PlannedBuoy { Pos = Lateral(c, hdg, lat), Tag = "G" });
-                }
 
-                if (s > route.LengthNm + GridLeadNm + 2f * d) break;
-                if (st > 400) break;
+            // Lattice cell (station, line) is occupied when (station + line) is even.
+            int stations = 0, used = 0;
+            for (int st = 0; st < 400 && GridLeadNm + st * stepNm <= route.LengthNm + GridLeadNm + 2f * d; st++)
+            {
+                int need = 0;
+                for (int k = 0; k < lines; k++) if (((k + st) & 1) == 0) need++;
+                if (used + need > maxBuoys) break;
+                used += need;
+                stations++;
+            }
+
+            if (stations == 0) return res;
+
+            int perChunk = ChunkSize(stations, stepNm);
+            for (int first = 0; first < stations; first += perChunk)
+            {
+                int last = Math.Min(first + perChunk, stations) - 1;
+                AddLine(res, route, first, last, 0, lines, rowStep, stepNm, true);
+                AddLine(res, route, first, last, lines - 1, lines, rowStep, stepNm, false);
+                bool up = true;
+                for (int k = lines - 2; k >= 1; k--)
+                {
+                    AddLine(res, route, first, last, k, lines, rowStep, stepNm, up);
+                    up = !up;
+                }
             }
 
             return res;
+        }
+
+        // Adds the occupied cells of one lattice line within a chunk, in ascending or descending station order.
+        private static void AddLine(List<PlannedBuoy> res, Route route, int first, int last, int k, int lines, float rowStep, float stepNm, bool ascending)
+        {
+            for (int i = 0; i <= last - first; i++)
+            {
+                int st = ascending ? first + i : last - i;
+                if (((k + st) & 1) != 0) continue;
+                route.At(GridLeadNm + st * stepNm, out GeoPosition c, out float hdg);
+                res.Add(new PlannedBuoy { Pos = Lateral(c, hdg, (k - (lines - 1) / 2f) * rowStep), Tag = "G" });
+            }
         }
 
         // Two barrier walls at +/- widthNm/2 from the route, a sparse centreline, and an optional end cap.
@@ -185,51 +218,46 @@ namespace ASWAutoHunt
             // Interior end-cap points between the walls.
             int capN = CorridorEndCap ? Math.Max(0, (int)Math.Ceiling(widthNm / sp) - 1) : 0;
             int maxStations = (int)Math.Floor(CorridorLengthNm / sp) + 1;
-            int used = 0;
-            float lastS = CorridorLeadNm;
+            // First decide how many stations the buoy budget allows (walls every station, centreline every Nth).
+            int stations = 0, used = 0;
             for (int st = 0; st < maxStations; st++)
             {
-                float s = CorridorLeadNm + st * sp;
-                bool centre = (st % CorridorCentrelineEvery) == 0;
-                int need = 2 + (centre ? 1 : 0);
+                int need = 2 + ((st % CorridorCentrelineEvery) == 0 ? 1 : 0);
                 if (used + need + capN > maxBuoys) break;
-
-                route.At(s, out GeoPosition c, out float hdg);
-                bool zig = (st % 2) == 1;
-                // Zig-zag across the lane so the aircraft never doubles back.
-                PlannedBuoy left = new PlannedBuoy { Pos = Lateral(c, hdg, -half), Tag = "L" };
-                PlannedBuoy right = new PlannedBuoy { Pos = Lateral(c, hdg, half), Tag = "R" };
-                PlannedBuoy mid = new PlannedBuoy { Pos = c, Tag = "C" };
-                if (!zig)
-                {
-                    res.Add(left);
-                    if (centre) res.Add(mid);
-                    res.Add(right);
-                }
-                else
-                {
-                    res.Add(right);
-                    if (centre) res.Add(mid);
-                    res.Add(left);
-                }
-
                 used += need;
-                lastS = s;
+                stations++;
             }
 
-            if (capN > 0 && used > 0)
+            if (stations == 0) return res;
+
+            // Fly it in chunks (thirds of the corridor): up one wall, across the lane, back down the other wall, then up the
+            // middle laying the centreline buoys; the aircraft ends the chunk at the far end, ready for the next chunk.
+            int perChunk = ChunkSize(stations, sp);
+            for (int first = 0; first < stations; first += perChunk)
             {
-                route.At(lastS + sp, out GeoPosition c, out float hdg);
-                bool leftToRight = (res[res.Count - 1].Tag == "L");
-                for (int i = 1; i <= capN; i++)
+                int last = Math.Min(first + perChunk, stations) - 1;
+                for (int st = first; st <= last; st++) res.Add(Station(route, st, sp, -half, "L"));
+                for (int st = last; st >= first; st--) res.Add(Station(route, st, sp, half, "R"));
+                for (int st = first; st <= last; st++)
                 {
-                    float lat = -half + i * (widthNm / (capN + 1));
-                    if (!leftToRight) lat = -lat;
-                    res.Add(new PlannedBuoy { Pos = Lateral(c, hdg, lat), Tag = "E" });
+                    if ((st % CorridorCentrelineEvery) == 0) res.Add(Station(route, st, sp, 0f, "C"));
                 }
+            }
+
+            // End cap across the far end, flown from the middle outwards then back.
+            for (int i = 1; i <= capN; i++)
+            {
+                float lat = -half + i * (widthNm / (capN + 1));
+                res.Add(Station(route, stations, sp, lat, "E"));
             }
 
             return res;
+        }
+
+        private static PlannedBuoy Station(Route route, int st, float sp, float lateralNm, string tag)
+        {
+            route.At(CorridorLeadNm + st * sp, out GeoPosition c, out float hdg);
+            return new PlannedBuoy { Pos = Lateral(c, hdg, lateralNm), Tag = tag };
         }
 
         // Fly the pattern from whichever end is closer to the aircraft.
