@@ -341,9 +341,10 @@ namespace ASWAutoHunt
             public int Buoys;
         }
 
-        // Splits an ordered pattern into contiguous runs, one per carrier, minimising the time until the last buoy is down.
-        // Slower carriers take the earlier (nearer) runs and faster ones the far end. Each run is limited to the buoys
-        // carried, so an aircraft that runs out hands the remainder to the others automatically.
+        // Splits a pattern between carriers, minimising the time until the last buoy is down. Points are ranked by distance
+        // from the group's centre; slower carriers take the nearest band and faster ones the far band. Each carrier keeps
+        // its points in the original pattern order (so chunk structure survives), and is limited to the buoys it carries,
+        // so an aircraft that runs out hands the remainder to the others automatically.
         public static List<List<PlannedBuoy>> Split(List<PlannedBuoy> pattern, List<Carrier> carriers)
         {
             int n = pattern.Count, m = carriers.Count;
@@ -351,19 +352,22 @@ namespace ASWAutoHunt
             for (int i = 0; i < m; i++) shares.Add(new List<PlannedBuoy>());
             if (n == 0 || m == 0) return shares;
 
-            // cum[i] = path length (nm) from point 0 to point i along the pattern order.
-            float[] cum = new float[n];
-            for (int i = 1; i < n; i++) cum[i] = cum[i - 1] + DistNm(pattern[i - 1].Pos, pattern[i].Pos);
+            double cLat = carriers.Average(c => c.Pos._latitude), cLon = carriers.Average(c => c.Pos._longitude);
+            GeoPosition centre = new GeoPosition(cLat, cLon);
+            int[] ranked = Enumerable.Range(0, n).OrderBy(i => DistNm(centre, pattern[i].Pos)).ToArray();
 
             int[] order = Enumerable.Range(0, m).OrderBy(i => carriers[i].SpeedKts).ToArray();
             int[] counts = new int[m];
 
-            // Hours for carrier c to fly to point 'start' and drop 'len' buoys along the pattern from there.
+            // Hours for carrier c to fly to and drop ranked[start .. start+len), visited in pattern order.
             Func<int, int, int, double> hours = (c, start, len) =>
             {
-                double speed = Math.Max(30f, carriers[c].SpeedKts);
-                double nm = DistNm(carriers[c].Pos, pattern[start].Pos) + (cum[start + len - 1] - cum[start]);
-                return nm / speed + len * DropSecPerBuoy / 3600.0;
+                int[] idx = new int[len];
+                Array.Copy(ranked, start, idx, 0, len);
+                Array.Sort(idx);
+                double nm = DistNm(carriers[c].Pos, pattern[idx[0]].Pos);
+                for (int k = 1; k < len; k++) nm += DistNm(pattern[idx[k - 1]].Pos, pattern[idx[k]].Pos);
+                return nm / Math.Max(30f, carriers[c].SpeedKts) + len * DropSecPerBuoy / 3600.0;
             };
 
             // Greedy fill for a candidate finishing time; true when every point is covered.
@@ -384,12 +388,16 @@ namespace ASWAutoHunt
             double lo = 0, hi = 200;
             if (!fill(hi))
             {
-                // Not enough buoys for the whole pattern: give everyone their maximum in order.
-                fill(double.MaxValue);
+                // Not enough buoys for the whole pattern: give everyone their maximum.
+                for (int i = 0, pos0 = 0; i < m; i++)
+                {
+                    counts[order[i]] = Math.Min(carriers[order[i]].Buoys, n - pos0);
+                    pos0 += counts[order[i]];
+                }
             }
             else
             {
-                for (int it = 0; it < 40; it++)
+                for (int it = 0; it < 30; it++)
                 {
                     double mid = (lo + hi) / 2;
                     if (fill(mid)) hi = mid; else lo = mid;
@@ -401,7 +409,11 @@ namespace ASWAutoHunt
             int pos = 0;
             foreach (int c in order)
             {
-                for (int k = 0; k < counts[c]; k++) shares[c].Add(pattern[pos++]);
+                int[] idx = new int[counts[c]];
+                Array.Copy(ranked, pos, idx, 0, counts[c]);
+                Array.Sort(idx);
+                foreach (int k in idx) shares[c].Add(pattern[k]);
+                pos += counts[c];
             }
 
             return shares;
