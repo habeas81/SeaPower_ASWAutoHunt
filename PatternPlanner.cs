@@ -330,5 +330,57 @@ namespace ASWAutoHunt
                 pattern.Reverse();
             }
         }
+
+        public const float OnPathToleranceNm = 1.0f; // a later buoy this close to a leg is dropped while passing over it
+
+        // Local flat-earth position in nm (fine for pattern-scale distances).
+        private static void ToNm(GeoPosition g, double refLat, out double x, out double y)
+        {
+            y = (g._latitude - refLat) * 60.0;
+            x = g._longitude * 60.0 * Math.Cos(refLat * Math.PI / 180.0);
+        }
+
+        // Efficiency pass: when a leg A->B flies over a buoy point that is planned later, drop that buoy on the way
+        // instead of crossing it now and returning for it. Points are inserted in order along the leg.
+        public static void PullOnPath(List<PlannedBuoy> pattern, GeoPosition from)
+        {
+            if (pattern.Count < 3) return;
+            double refLat = from._latitude;
+            GeoPosition prev = from;
+            for (int i = 0; i < pattern.Count - 1; i++)
+            {
+                ToNm(prev, refLat, out double ax, out double ay);
+                ToNm(pattern[i].Pos, refLat, out double bx, out double by);
+                double dx = bx - ax, dy = by - ay, len2 = dx * dx + dy * dy;
+                if (len2 > 1e-6)
+                {
+                    List<KeyValuePair<double, PlannedBuoy>> found = new List<KeyValuePair<double, PlannedBuoy>>();
+                    for (int j = i + 1; j < pattern.Count; j++)
+                    {
+                        ToNm(pattern[j].Pos, refLat, out double px, out double py);
+                        double t = ((px - ax) * dx + (py - ay) * dy) / len2;
+                        if (t <= 0.0 || t >= 1.0) continue;
+                        double cx = ax + t * dx - px, cy = ay + t * dy - py;
+                        if (cx * cx + cy * cy <= OnPathToleranceNm * OnPathToleranceNm)
+                        {
+                            found.Add(new KeyValuePair<double, PlannedBuoy>(t, pattern[j]));
+                        }
+                    }
+
+                    if (found.Count > 0)
+                    {
+                        found.Sort((p, q) => p.Key.CompareTo(q.Key));
+                        foreach (var f in found) pattern.Remove(f.Value);
+                        pattern.InsertRange(i, found.ConvertAll(f => f.Value));
+                        // Continue from the last inserted buoy; the original B follows it on the same line.
+                        i += found.Count - 1;
+                        prev = pattern[i].Pos;
+                        continue;
+                    }
+                }
+
+                prev = pattern[i].Pos;
+            }
+        }
     }
 }

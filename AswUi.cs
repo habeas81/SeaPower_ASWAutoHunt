@@ -194,6 +194,7 @@ namespace ASWAutoHunt
                 }
 
                 PatternPlanner.OrientFor(pattern, src._geoPosition);
+                PatternPlanner.PullOnPath(pattern, src._geoPosition);
                 int before = pattern.Count;
                 List<CoverageSource> existing = CoverageSources(src, out int nWater, out int nQueued);
                 pattern = Deconflict(pattern, existing, ammo);
