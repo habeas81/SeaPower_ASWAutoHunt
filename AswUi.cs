@@ -231,7 +231,7 @@ namespace ASWAutoHunt
         private GeoPosition? _centre;
         private MarkerDrawing _centreMarker;
         private MarkerDrawing _endMarker;
-        private RulerDrawing _ruler;
+        private RingDrawing _ring;
 
         public override void OnExit()
         {
@@ -243,10 +243,10 @@ namespace ASWAutoHunt
         {
             MapDrawingLayer layer = Globals._mainGameViewModel?.Map?.DrawingLayer;
             if (layer == null) return;
-            if (_ruler != null) layer.Graphics.Remove(_ruler);
+            if (_ring != null) layer.Graphics.Remove(_ring);
             if (_centreMarker != null) layer.Graphics.Remove(_centreMarker);
             if (_endMarker != null) layer.Graphics.Remove(_endMarker);
-            _ruler = null;
+            _ring = null;
             _centreMarker = null;
             _endMarker = null;
         }
@@ -257,10 +257,10 @@ namespace ASWAutoHunt
             if (layer == null) return;
             _centreMarker = new MarkerDrawing { Location = centre };
             _endMarker = new MarkerDrawing { Location = centre };
-            _ruler = new RulerDrawing { Start = _centreMarker, End = _endMarker };
+            _ring = new RingDrawing { Center = _centreMarker, Extremis = _endMarker };
             layer.Graphics.Add(_centreMarker);
             layer.Graphics.Add(_endMarker);
-            layer.Graphics.Add(_ruler);
+            layer.Graphics.Add(_ring);
         }
 
         private static ObjectBase PickShip(object v)
@@ -323,7 +323,7 @@ namespace ASWAutoHunt
             else if (_endMarker != null)
             {
                 _endMarker.Location = mousePosition;
-                _ruler?.Update();
+                _ring?.Update();
             }
 
             return base.MouseAction(v, args, mousePosition, map, ref handled);
