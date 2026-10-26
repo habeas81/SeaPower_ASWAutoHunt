@@ -119,6 +119,17 @@ namespace ASWAutoHunt
                 }
 
                 PatternPlanner.OrientFor(pattern, src._geoPosition);
+                int before = pattern.Count;
+                List<GeoPosition> existing = CoverageSources(src, out int nWater, out int nQueued);
+                pattern = Deconflict(pattern, existing, ammo);
+                int skipped = before - pattern.Count;
+                if (pattern.Count == 0)
+                {
+                    src.ShowOrderFeedback("Area already covered by existing or queued buoys");
+                    ModLog.Event($"ASW pattern skipped: {src.getUIDAndName()} fully covered (water={nWater} queued={nQueued})");
+                    return;
+                }
+
                 Cancel(src, silent: true);
 
                 // Same preparation the game's own sonobuoy-line mode does before queuing drops.
@@ -149,13 +160,80 @@ namespace ASWAutoHunt
                 string desc = kind == PatternKind.Corridor ? $"corridor {widthNm:0} nm wide" : kind == PatternKind.GridRoute ? "grid along route"
                     : kind == PatternKind.Ring ? "ring with infill" : kind == PatternKind.Line ? "straight line" : "grid at datum";
                 bool barrier = kind == PatternKind.Corridor || kind == PatternKind.Line;
-                src.ShowOrderFeedback($"ASW pattern: {desc}, {pattern.Count} buoys, spacing {(barrier ? PatternPlanner.BarrierSpacingNm(ammo) : PatternPlanner.HexSpacingNm(ammo)):0.0} nm");
-                ModLog.Event($"ASW pattern assigned: {src.getUIDAndName()} {desc} buoys={pattern.Count}/{have} ammo={ammo}");
+                src.ShowOrderFeedback($"ASW pattern: {desc}, {pattern.Count} buoys{(skipped > 0 ? $" ({skipped} skipped, already covered)" : "")}, spacing {(barrier ? PatternPlanner.BarrierSpacingNm(ammo) : PatternPlanner.HexSpacingNm(ammo)):0.0} nm");
+                ModLog.Event($"ASW pattern assigned: {src.getUIDAndName()} {desc} buoys={pattern.Count}/{have} skipped={skipped} (water={nWater} queued={nQueued}) ammo={ammo}");
             }
             catch (Exception ex)
             {
                 ModLog.Error("Assign", ex);
             }
+        }
+
+        // ---- Deconfliction ----
+        // A planned buoy is dropped when an existing/queued friendly buoy is closer than OverlapFactor x (sum of both
+        // effective radii). 0.75 x 2r = 1.5r sits just inside the hex (1.73r) and barrier (1.8r) spacings, so a pattern's own
+        // neighbours never trigger it, but a buoy that is already mostly inside another's coverage does.
+        public const float OverlapFactor = 0.75f;
+        public const float MinRemainingLifeSec = 900f; // buoys about to expire do not count as coverage
+
+        // Positions of friendly buoys in the water or in flight, and drops queued by any friendly aircraft/helicopter
+        // (this includes manual shift-queued drops). The unit being tasked is skipped: its old plan is being replaced.
+        private static List<GeoPosition> CoverageSources(ObjectBase src, out int inWater, out int queued)
+        {
+            List<GeoPosition> res = new List<GeoPosition>();
+            inWater = 0;
+            queued = 0;
+            ObjectsManager mgr = Singleton<ObjectsManager>.Instance;
+            if (mgr?._listOfAllObjects == null || src?._taskforce == null) return res;
+            foreach (ObjectBase o in mgr._listOfAllObjects.ToList())
+            {
+                if (o == null || o.IsDestroyed || o._taskforce == null || o._taskforce.Side != src._taskforce.Side) continue;
+                if (o is Bomb b)
+                {
+                    if (b._ap == null || b._ap._subType != Ammunition.Type.Sonobuoy) continue;
+                    if (b.Deployed.Value && b.RemainingLife.Value < MinRemainingLifeSec) continue;
+                    res.Add(b._geoPosition);
+                    inWater++;
+                }
+                else if ((o is Aircraft || o is Helicopter) && o != src && o._userRoot != null)
+                {
+                    foreach (ITaskViewModel tvm in o._userRoot.TaskViewModels)
+                    {
+                        if (tvm?.Task is AttackAtWaypoint a && o.getAmmunitionByName(a._ammunitionName)?._ap?._subType == Ammunition.Type.Sonobuoy)
+                        {
+                            for (int i = 0; i < Math.Max(1, a._salvo); i++) res.Add(a.WaypointPosition);
+                            queued += Math.Max(1, a._salvo);
+                        }
+                    }
+                }
+            }
+
+            return res;
+        }
+
+        // Keeps pattern order; removes points already covered by an existing source. Neighbours in the new pattern are not
+        // compared with each other (the planner already spaces them correctly).
+        private static List<PlannedBuoy> Deconflict(List<PlannedBuoy> pattern, List<GeoPosition> existing, string ammo)
+        {
+            if (existing.Count == 0) return pattern;
+            float limit = OverlapFactor * 2f * PatternPlanner.EffectiveRadiusNm(ammo);
+            List<PlannedBuoy> kept = new List<PlannedBuoy>(pattern.Count);
+            foreach (PlannedBuoy p in pattern)
+            {
+                bool covered = false;
+                foreach (GeoPosition q in existing)
+                {
+                    if (PatternPlanner.DistNm(p.Pos, q) < limit)
+                    {
+                        covered = true;
+                        break;
+                    }
+                }
+
+                if (!covered) kept.Add(p);
+            }
+
+            return kept;
         }
 
         public static void Cancel(ObjectBase src, bool silent = false)
