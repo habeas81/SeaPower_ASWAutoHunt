@@ -120,7 +120,7 @@ namespace ASWAutoHunt
 
                 PatternPlanner.OrientFor(pattern, src._geoPosition);
                 int before = pattern.Count;
-                List<GeoPosition> existing = CoverageSources(src, out int nWater, out int nQueued);
+                List<CoverageSource> existing = CoverageSources(src, out int nWater, out int nQueued);
                 pattern = Deconflict(pattern, existing, ammo);
                 int skipped = before - pattern.Count;
                 if (pattern.Count == 0)
@@ -169,18 +169,25 @@ namespace ASWAutoHunt
             }
         }
 
+        private struct CoverageSource
+        {
+            public readonly GeoPosition Pos;
+            public readonly float RadiusNm;
+            public CoverageSource(GeoPosition pos, float radiusNm) { Pos = pos; RadiusNm = radiusNm; }
+        }
+
         // ---- Deconfliction ----
-        // A planned buoy is dropped when an existing/queued friendly buoy is closer than OverlapFactor x (sum of both
-        // effective radii). 0.75 x 2r = 1.5r sits just inside the hex (1.73r) and barrier (1.8r) spacings, so a pattern's own
-        // neighbours never trigger it, but a buoy that is already mostly inside another's coverage does.
+        // A planned buoy is dropped when an existing/queued friendly buoy is closer than OverlapFactor x (new radius + that
+        // buoy's own effective radius). For equal buoys 0.75 x 2r = 1.5r, just inside the hex (1.73r) and barrier (1.8r)
+        // spacings, so a pattern's own neighbours never trigger it, but a buoy mostly inside another's coverage does.
         public const float OverlapFactor = 0.75f;
         public const float MinRemainingLifeSec = 900f; // buoys about to expire do not count as coverage
 
         // Positions of friendly buoys in the water or in flight, and drops queued by any friendly aircraft/helicopter
         // (this includes manual shift-queued drops). The unit being tasked is skipped: its old plan is being replaced.
-        private static List<GeoPosition> CoverageSources(ObjectBase src, out int inWater, out int queued)
+        private static List<CoverageSource> CoverageSources(ObjectBase src, out int inWater, out int queued)
         {
-            List<GeoPosition> res = new List<GeoPosition>();
+            List<CoverageSource> res = new List<CoverageSource>();
             inWater = 0;
             queued = 0;
             ObjectsManager mgr = Singleton<ObjectsManager>.Instance;
@@ -192,7 +199,7 @@ namespace ASWAutoHunt
                 {
                     if (b._ap == null || b._ap._subType != Ammunition.Type.Sonobuoy) continue;
                     if (b.Deployed.Value && b.RemainingLife.Value < MinRemainingLifeSec) continue;
-                    res.Add(b._geoPosition);
+                    res.Add(new CoverageSource(b._geoPosition, PatternPlanner.EffectiveRadiusNm(b._ap._ammunitionFileName)));
                     inWater++;
                 }
                 else if ((o is Aircraft || o is Helicopter) && o != src && o._userRoot != null)
@@ -201,7 +208,8 @@ namespace ASWAutoHunt
                     {
                         if (tvm?.Task is AttackAtWaypoint a && o.getAmmunitionByName(a._ammunitionName)?._ap?._subType == Ammunition.Type.Sonobuoy)
                         {
-                            for (int i = 0; i < Math.Max(1, a._salvo); i++) res.Add(a.WaypointPosition);
+                            float qr = PatternPlanner.EffectiveRadiusNm(a._ammunitionName);
+                            for (int i = 0; i < Math.Max(1, a._salvo); i++) res.Add(new CoverageSource(a.WaypointPosition, qr));
                             queued += Math.Max(1, a._salvo);
                         }
                     }
@@ -213,17 +221,18 @@ namespace ASWAutoHunt
 
         // Keeps pattern order; removes points already covered by an existing source. Neighbours in the new pattern are not
         // compared with each other (the planner already spaces them correctly).
-        private static List<PlannedBuoy> Deconflict(List<PlannedBuoy> pattern, List<GeoPosition> existing, string ammo)
+        private static List<PlannedBuoy> Deconflict(List<PlannedBuoy> pattern, List<CoverageSource> existing, string ammo)
         {
             if (existing.Count == 0) return pattern;
-            float limit = OverlapFactor * 2f * PatternPlanner.EffectiveRadiusNm(ammo);
+            float rNew = PatternPlanner.EffectiveRadiusNm(ammo);
             List<PlannedBuoy> kept = new List<PlannedBuoy>(pattern.Count);
             foreach (PlannedBuoy p in pattern)
             {
                 bool covered = false;
-                foreach (GeoPosition q in existing)
+                foreach (CoverageSource q in existing)
                 {
-                    if (PatternPlanner.DistNm(p.Pos, q) < limit)
+                    // Covered when the two detection circles overlap by more than the allowed fraction (existing buoy's own radius).
+                    if (PatternPlanner.DistNm(p.Pos, q.Pos) < OverlapFactor * (rNew + q.RadiusNm))
                     {
                         covered = true;
                         break;
