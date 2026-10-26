@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using SeaPower;
 
 namespace ASWAutoHunt
@@ -329,6 +330,81 @@ namespace ASWAutoHunt
             {
                 pattern.Reverse();
             }
+        }
+
+        public const float DropSecPerBuoy = 8f; // time allowance per release in the schedule estimate
+
+        public struct Carrier
+        {
+            public GeoPosition Pos;
+            public float SpeedKts;
+            public int Buoys;
+        }
+
+        // Splits an ordered pattern into contiguous runs, one per carrier, minimising the time until the last buoy is down.
+        // Slower carriers take the earlier (nearer) runs and faster ones the far end. Each run is limited to the buoys
+        // carried, so an aircraft that runs out hands the remainder to the others automatically.
+        public static List<List<PlannedBuoy>> Split(List<PlannedBuoy> pattern, List<Carrier> carriers)
+        {
+            int n = pattern.Count, m = carriers.Count;
+            List<List<PlannedBuoy>> shares = new List<List<PlannedBuoy>>();
+            for (int i = 0; i < m; i++) shares.Add(new List<PlannedBuoy>());
+            if (n == 0 || m == 0) return shares;
+
+            // cum[i] = path length (nm) from point 0 to point i along the pattern order.
+            float[] cum = new float[n];
+            for (int i = 1; i < n; i++) cum[i] = cum[i - 1] + DistNm(pattern[i - 1].Pos, pattern[i].Pos);
+
+            int[] order = Enumerable.Range(0, m).OrderBy(i => carriers[i].SpeedKts).ToArray();
+            int[] counts = new int[m];
+
+            // Hours for carrier c to fly to point 'start' and drop 'len' buoys along the pattern from there.
+            Func<int, int, int, double> hours = (c, start, len) =>
+            {
+                double speed = Math.Max(30f, carriers[c].SpeedKts);
+                double nm = DistNm(carriers[c].Pos, pattern[start].Pos) + (cum[start + len - 1] - cum[start]);
+                return nm / speed + len * DropSecPerBuoy / 3600.0;
+            };
+
+            // Greedy fill for a candidate finishing time; true when every point is covered.
+            Func<double, bool> fill = t =>
+            {
+                int idx = 0;
+                foreach (int c in order)
+                {
+                    int len = 0;
+                    while (idx + len < n && len < carriers[c].Buoys && hours(c, idx, len + 1) <= t) len++;
+                    counts[c] = len;
+                    idx += len;
+                }
+
+                return idx >= n;
+            };
+
+            double lo = 0, hi = 200;
+            if (!fill(hi))
+            {
+                // Not enough buoys for the whole pattern: give everyone their maximum in order.
+                fill(double.MaxValue);
+            }
+            else
+            {
+                for (int it = 0; it < 40; it++)
+                {
+                    double mid = (lo + hi) / 2;
+                    if (fill(mid)) hi = mid; else lo = mid;
+                }
+
+                fill(hi);
+            }
+
+            int pos = 0;
+            foreach (int c in order)
+            {
+                for (int k = 0; k < counts[c]; k++) shares[c].Add(pattern[pos++]);
+            }
+
+            return shares;
         }
 
         public const float OnPathToleranceNm = 1.0f; // a later buoy this close to a leg is dropped while passing over it

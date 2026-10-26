@@ -166,6 +166,19 @@ namespace ASWAutoHunt
                 }
 
                 int budget = Math.Min(have, MaxBuoysPerPattern);
+                List<ObjectBase> group = new List<ObjectBase> { src };
+                List<string> ammos = new List<string> { ammo };
+                foreach (ObjectBase p in PartnersOf(src))
+                {
+                    int n = PickAmmo(p, out string pa);
+                    if (n < 1) continue;
+                    group.Add(p);
+                    ammos.Add(pa);
+                    budget += n;
+                }
+
+                budget = Math.Min(budget, MaxBuoysPerPattern * group.Count);
+                ClearPartners(src);
                 List<PlannedBuoy> pattern;
                 if (kind == PatternKind.GridDatum)
                 {
@@ -193,10 +206,18 @@ namespace ASWAutoHunt
                     return;
                 }
 
-                PatternPlanner.OrientFor(pattern, src._geoPosition);
-                PatternPlanner.PullOnPath(pattern, src._geoPosition);
+                // Orient from the group's centroid so the slowest aircraft (given the first points) start near the near end.
+                double cLat = 0, cLon = 0;
+                foreach (ObjectBase g in group)
+                {
+                    cLat += g._geoPosition._latitude;
+                    cLon += g._geoPosition._longitude;
+                }
+
+                GeoPosition centroid = group.Count == 1 ? src._geoPosition : new GeoPosition(cLat / group.Count, cLon / group.Count);
+                PatternPlanner.OrientFor(pattern, centroid);
                 int before = pattern.Count;
-                List<CoverageSource> existing = CoverageSources(src, out int nWater, out int nQueued);
+                List<CoverageSource> existing = CoverageSources(src, group, out int nWater, out int nQueued);
                 pattern = Deconflict(pattern, existing, ammo);
                 int skipped = before - pattern.Count;
                 if (pattern.Count == 0)
@@ -206,46 +227,121 @@ namespace ASWAutoHunt
                     return;
                 }
 
-                Cancel(src, silent: true);
-
-                Plan plan = new Plan { Ammo = ammo, Total = pattern.Count };
-                plan.LastPos = src._geoPosition;
-                foreach (PlannedBuoy b in pattern)
-                {
-                    plan.Points.Add(b.Pos);
-                    plan.Tags.Add(b.Tag);
-                }
-
-                QueueDrops(src, plan, plan.Points.Count);
-                // Full planned order with leg lengths, to review pattern efficiency.
-                GeoPosition prev = src._geoPosition;
-                float total = 0f;
-                for (int i = 0; i < pattern.Count; i++)
-                {
-                    float leg = PatternPlanner.DistNm(prev, pattern[i].Pos);
-                    total += leg;
-                    ModLog.Event($"  plan {src.getUIDAndName()} #{i + 1} {pattern[i].Tag} leg={leg:0.0}nm cum={total:0.0}nm lat={pattern[i].Pos._latitude:0.000} lon={pattern[i].Pos._longitude:0.000}");
-                    prev = pattern[i].Pos;
-                }
-
-                foreach (PlannedBuoy b in pattern)
-                {
-                    MarkerDrawing m = new MarkerDrawing { Location = b.Pos };
-                    DrawingLayerOf()?.Graphics.Add(m);
-                    plan.Markers.Add(m);
-                }
-
-                Plans[src] = plan;
                 string desc = kind == PatternKind.Corridor ? $"corridor {widthNm:0} nm wide" : kind == PatternKind.GridRoute ? "grid along route"
                     : kind == PatternKind.Ring ? "ring with infill" : kind == PatternKind.Line ? "straight line" : "grid at datum";
                 bool barrier = kind == PatternKind.Corridor || kind == PatternKind.Line;
-                src.ShowOrderFeedback($"ASW pattern: {desc}, {pattern.Count} buoys{(skipped > 0 ? $" ({skipped} skipped, already covered)" : "")}, spacing {(barrier ? PatternPlanner.BarrierSpacingNm(ammo) : PatternPlanner.HexSpacingNm(ammo)):0.0} nm");
-                ModLog.Event($"ASW pattern assigned: {src.getUIDAndName()} {desc} buoys={pattern.Count}/{have} skipped={skipped} (water={nWater} queued={nQueued}) ammo={ammo}");
+                ModLog.Event($"ASW pattern assigned: {src.getUIDAndName()} {desc} buoys={pattern.Count}/{budget} skipped={skipped} (water={nWater} queued={nQueued}) ammo={ammo} aircraft={group.Count}");
+
+                List<List<PlannedBuoy>> shares;
+                if (group.Count == 1)
+                {
+                    shares = new List<List<PlannedBuoy>> { pattern };
+                }
+                else
+                {
+                    List<PatternPlanner.Carrier> carriers = new List<PatternPlanner.Carrier>();
+                    for (int i = 0; i < group.Count; i++)
+                    {
+                        carriers.Add(new PatternPlanner.Carrier { Pos = group[i]._geoPosition, SpeedKts = CruiseKnots(group[i]), Buoys = PickAmmo(group[i], out _) });
+                    }
+
+                    shares = PatternPlanner.Split(pattern, carriers);
+                }
+
+                for (int i = 0; i < group.Count; i++)
+                {
+                    Cancel(group[i], silent: true);
+                    if (shares[i].Count == 0)
+                    {
+                        if (group.Count > 1) ModLog.Event($"  coordination: {group[i].getUIDAndName()} given no buoys");
+                        continue;
+                    }
+
+                    string extra = i == 0 && skipped > 0 ? $" ({skipped} skipped, already covered)" : "";
+                    string who = group.Count > 1 ? $" [share {shares[i].Count}/{pattern.Count}, {group.Count} aircraft]" : "";
+                    Launch(group[i], ammos[i], shares[i]);
+                    group[i].ShowOrderFeedback($"ASW pattern: {desc}, {shares[i].Count} buoys{extra}{who}, spacing {(barrier ? PatternPlanner.BarrierSpacingNm(ammo) : PatternPlanner.HexSpacingNm(ammo)):0.0} nm");
+                }
             }
             catch (Exception ex)
             {
                 ModLog.Error("Assign", ex);
             }
+        }
+
+        // Queues one aircraft's share, draws its markers and logs the planned order with leg lengths.
+        private static void Launch(ObjectBase acft, string ammo, List<PlannedBuoy> pts)
+        {
+            PatternPlanner.PullOnPath(pts, acft._geoPosition);
+            Plan plan = new Plan { Ammo = ammo, Total = pts.Count, LastPos = acft._geoPosition };
+            foreach (PlannedBuoy b in pts)
+            {
+                plan.Points.Add(b.Pos);
+                plan.Tags.Add(b.Tag);
+            }
+
+            QueueDrops(acft, plan, plan.Points.Count);
+            GeoPosition prev = acft._geoPosition;
+            float total = 0f;
+            for (int i = 0; i < pts.Count; i++)
+            {
+                float leg = PatternPlanner.DistNm(prev, pts[i].Pos);
+                total += leg;
+                ModLog.Event($"  plan {acft.getUIDAndName()} #{i + 1} {pts[i].Tag} leg={leg:0.0}nm cum={total:0.0}nm lat={pts[i].Pos._latitude:0.000} lon={pts[i].Pos._longitude:0.000}");
+                prev = pts[i].Pos;
+            }
+
+            foreach (PlannedBuoy b in pts)
+            {
+                MarkerDrawing m = new MarkerDrawing { Location = b.Pos };
+                DrawingLayerOf()?.Graphics.Add(m);
+                plan.Markers.Add(m);
+            }
+
+            Plans[acft] = plan;
+        }
+
+        // ---- Coordination: aircraft the player has chosen to share the next pattern with ----
+        private static readonly Dictionary<ObjectBase, HashSet<ObjectBase>> Partners = new Dictionary<ObjectBase, HashSet<ObjectBase>>();
+        public const int MaxListedPartners = 8;
+
+        // Assumed patrol speed: a fraction of max forward speed, never below a hover-ish floor.
+        public static float CruiseKnots(ObjectBase o) => Math.Max(60f, o.MaxForwardSpeedInKnots * 0.7f);
+
+        public static bool IsPartner(ObjectBase src, ObjectBase o) => Partners.TryGetValue(src, out var s) && s.Contains(o);
+
+        public static void TogglePartner(ObjectBase src, ObjectBase o)
+        {
+            if (!Partners.TryGetValue(src, out var s)) Partners[src] = s = new HashSet<ObjectBase>();
+            if (!s.Remove(o)) s.Add(o);
+            src.ShowOrderFeedback($"ASW coordination: {s.Count} other aircraft will share the next pattern");
+        }
+
+        public static void ClearPartners(ObjectBase src) => Partners.Remove(src);
+        public static int PartnerCount(ObjectBase src) => Partners.TryGetValue(src, out var s) ? s.Count : 0;
+
+        private static IEnumerable<ObjectBase> PartnersOf(ObjectBase src)
+        {
+            if (!Partners.TryGetValue(src, out var s)) yield break;
+            foreach (ObjectBase o in s.ToList())
+            {
+                if (o != null && !o.IsDestroyed && IsBuoyCarrier(o)) yield return o;
+            }
+        }
+
+        // Other friendly buoy carriers, nearest first, for the coordination menu.
+        public static List<ObjectBase> CandidatePartners(ObjectBase src)
+        {
+            List<ObjectBase> res = new List<ObjectBase>();
+            ObjectsManager mgr = Singleton<ObjectsManager>.Instance;
+            if (mgr?._listOfAllObjects == null || src?._taskforce == null) return res;
+            foreach (ObjectBase o in mgr._listOfAllObjects.ToList())
+            {
+                if (o == null || o == src || o._taskforce == null || o._taskforce.Side != src._taskforce.Side || !o.IsPlayerObject) continue;
+                if (IsBuoyCarrier(o)) res.Add(o);
+            }
+
+            return res.OrderBy(o => PatternPlanner.DistNm(src._geoPosition, o._geoPosition)).Take(MaxListedPartners).ToList();
         }
 
         private struct CoverageSource
@@ -264,7 +360,7 @@ namespace ASWAutoHunt
 
         // Positions of friendly buoys in the water or in flight, and drops queued by any friendly aircraft/helicopter
         // (this includes manual shift-queued drops). The unit being tasked is skipped: its old plan is being replaced.
-        private static List<CoverageSource> CoverageSources(ObjectBase src, out int inWater, out int queued)
+        private static List<CoverageSource> CoverageSources(ObjectBase src, ICollection<ObjectBase> replaced, out int inWater, out int queued)
         {
             List<CoverageSource> res = new List<CoverageSource>();
             inWater = 0;
@@ -281,7 +377,7 @@ namespace ASWAutoHunt
                     res.Add(new CoverageSource(b._geoPosition, PatternPlanner.EffectiveRadiusNm(b._ap._ammunitionFileName)));
                     inWater++;
                 }
-                else if ((o is Aircraft || o is Helicopter) && o != src && o._userRoot != null)
+                else if ((o is Aircraft || o is Helicopter) && !replaced.Contains(o) && o._userRoot != null)
                 {
                     foreach (ITaskViewModel tvm in o._userRoot.TaskViewModels)
                     {
@@ -616,6 +712,14 @@ namespace ASWAutoHunt
                     if (AswPlanner.CanResume(o))
                     {
                         sub.Insert(0, new ContextMenuItem("Resume buoy deployment", null, new DelegateCommand(_ => AswPlanner.Resume(o))));
+                    }
+
+                    foreach (ObjectBase partner in AswPlanner.CandidatePartners(o))
+                    {
+                        ObjectBase pp = partner;
+                        AswPlanner.PickAmmo(pp, out string pAmmo);
+                        string mark = AswPlanner.IsPartner(o, pp) ? "[x]" : "[ ]";
+                        sub.Add(new ContextMenuItem($"{mark} Share with {pp.getUIDAndName()} ({pp.getAmmunitionAmountByName(pAmmo)} buoys)", null, new DelegateCommand(_ => AswPlanner.TogglePartner(o, pp))));
                     }
 
                     sub.Add(new ContextMenuItem("Cancel ASW pattern", null, new DelegateCommand(_ => AswPlanner.Cancel(o))));
