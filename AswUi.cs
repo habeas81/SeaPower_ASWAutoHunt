@@ -24,7 +24,78 @@ namespace ASWAutoHunt
             public string Ammo;
             public int Total;
             public readonly List<MarkerDrawing> Markers = new List<MarkerDrawing>();
+            public readonly List<GeoPosition> Points = new List<GeoPosition>(); // undropped points, in drop order
+            public int StartAmmo;       // buoys aboard when the (re)queue happened
+            public bool Interrupted;    // queue was wiped (e.g. manual waypoint) before the pattern finished
             public float NextCheck;
+        }
+
+        public static bool CanResume(ObjectBase o) => Plans.TryGetValue(o, out Plan p) && p.Interrupted && p.Points.Count > 0;
+
+        // Same preparation the game's own sonobuoy-line mode does before queuing drops.
+        private static void QueueDrops(ObjectBase src, Plan plan, int count)
+        {
+            if (src.CurrentOrder.Value.OrderType != Order.Type.None)
+            {
+                src.setOrder(Order.Type.None, (ObjectBase)null, displayOrderText: false);
+            }
+
+            if (src.Formation != null && src.Formation.LeaderStation.UnitObject != src)
+            {
+                src.Formation.MakeUnitActIndependently(src);
+            }
+
+            src.RemoveWaypoints();
+            Ammunition ammoObj = src.getAmmunitionByName(plan.Ammo);
+            VisualActionTask last = null;
+            for (int i = 0; i < count; i++)
+            {
+                last = src.SetAttackAtWaypointTask(ammoObj._ap._ammunitionFileName, null, plan.Points[i], plan.Points[i], 1, last);
+            }
+
+            plan.StartAmmo = src.getAmmunitionAmountByName(plan.Ammo);
+            plan.Interrupted = false;
+            plan.NextCheck = Time.time + ProgressCheckSec;
+        }
+
+        // Re-queue the buoys still undropped after the queue was cleared (e.g. by an accidental manual waypoint).
+        public static void Resume(ObjectBase src)
+        {
+            try
+            {
+                if (!CanResume(src))
+                {
+                    src.ShowOrderFeedback("No interrupted ASW pattern to resume");
+                    return;
+                }
+
+                Plan plan = Plans[src];
+                int have = src.getAmmunitionAmountByName(plan.Ammo);
+                int count = Math.Min(plan.Points.Count, have);
+                if (count < 1)
+                {
+                    src.ShowOrderFeedback("No sonobuoys left to resume pattern");
+                    Cancel(src, silent: true);
+                    return;
+                }
+
+                // Drop surplus points (and their markers) if we no longer carry enough buoys.
+                while (plan.Points.Count > count)
+                {
+                    plan.Points.RemoveAt(plan.Points.Count - 1);
+                    DrawingLayerOf()?.Graphics.Remove(plan.Markers[plan.Markers.Count - 1]);
+                    plan.Markers.RemoveAt(plan.Markers.Count - 1);
+                }
+
+                plan.Total = count;
+                QueueDrops(src, plan, count);
+                src.ShowOrderFeedback($"Resuming ASW pattern: {count} buoys remaining");
+                ModLog.Event($"ASW pattern resumed: {src.getUIDAndName()} buoys={count}");
+            }
+            catch (Exception ex)
+            {
+                ModLog.Error("Resume", ex);
+            }
         }
 
         private static readonly Dictionary<ObjectBase, Plan> Plans = new Dictionary<ObjectBase, Plan>();
@@ -132,25 +203,11 @@ namespace ASWAutoHunt
 
                 Cancel(src, silent: true);
 
-                // Same preparation the game's own sonobuoy-line mode does before queuing drops.
-                if (src.CurrentOrder.Value.OrderType != Order.Type.None)
-                {
-                    src.setOrder(Order.Type.None, (ObjectBase)null, displayOrderText: false);
-                }
-
-                if (src.Formation != null && src.Formation.LeaderStation.UnitObject != src)
-                {
-                    src.Formation.MakeUnitActIndependently(src);
-                }
-
-                src.RemoveWaypoints();
-
-                Ammunition ammoObj = src.getAmmunitionByName(ammo);
-                VisualActionTask last = null;
-                Plan plan = new Plan { Ammo = ammo, Total = pattern.Count, NextCheck = Time.time + ProgressCheckSec };
+                Plan plan = new Plan { Ammo = ammo, Total = pattern.Count };
+                foreach (PlannedBuoy b in pattern) plan.Points.Add(b.Pos);
+                QueueDrops(src, plan, plan.Points.Count);
                 foreach (PlannedBuoy b in pattern)
                 {
-                    last = src.SetAttackAtWaypointTask(ammoObj._ap._ammunitionFileName, null, b.Pos, b.Pos, 1, last);
                     MarkerDrawing m = new MarkerDrawing { Location = b.Pos };
                     DrawingLayerOf()?.Graphics.Add(m);
                     plan.Markers.Add(m);
@@ -278,6 +335,12 @@ namespace ASWAutoHunt
             plan.NextCheck = Time.time + ProgressCheckSec;
             try
             {
+                if (plan.Interrupted)
+                {
+                    if (o.IsDestroyed) Cancel(o, silent: true);
+                    return;
+                }
+
                 int remaining = 0;
                 if (o._userRoot != null)
                 {
@@ -287,16 +350,40 @@ namespace ASWAutoHunt
                     }
                 }
 
-                if (o.IsDestroyed || remaining == 0)
+                if (o.IsDestroyed)
                 {
                     ClearMarkers(plan, plan.Markers.Count);
                     Plans.Remove(o);
                     return;
                 }
 
-                int dropped = plan.Total - remaining;
-                int toClear = dropped - (plan.Total - plan.Markers.Count);
-                if (toClear > 0) ClearMarkers(plan, toClear);
+                if (remaining == 0)
+                {
+                    // Queue empty: finished, or wiped by another order. Ammo used tells which.
+                    int used = plan.StartAmmo - o.getAmmunitionAmountByName(plan.Ammo);
+                    if (used >= plan.Points.Count)
+                    {
+                        ClearMarkers(plan, plan.Markers.Count);
+                        Plans.Remove(o);
+                        return;
+                    }
+
+                    plan.Points.RemoveRange(0, Math.Max(0, used));
+                    ClearMarkers(plan, Math.Max(0, plan.Markers.Count - plan.Points.Count));
+                    plan.Interrupted = true;
+                    o.ShowOrderFeedback($"ASW pattern interrupted, {plan.Points.Count} buoys unplaced (Orders > ASW Pattern > Resume)");
+                    ModLog.Event($"ASW pattern interrupted: {o.getUIDAndName()} remaining={plan.Points.Count}");
+                    return;
+                }
+
+                // Markers track the queue: one per point still queued.
+                int toClear = plan.Markers.Count - remaining;
+                if (toClear > 0)
+                {
+                    int done = plan.Points.Count - remaining;
+                    plan.Points.RemoveRange(0, Math.Min(done, plan.Points.Count));
+                    ClearMarkers(plan, toClear);
+                }
             }
             catch (Exception ex)
             {
@@ -483,6 +570,11 @@ namespace ASWAutoHunt
                     {
                         float width = w;
                         sub.Add(new ContextMenuItem($"Corridor {width:0} nm wide", null, new DelegateCommand(_ => AswPickState.Begin(o, PatternKind.Corridor, width))));
+                    }
+
+                    if (AswPlanner.CanResume(o))
+                    {
+                        sub.Insert(0, new ContextMenuItem("Resume buoy deployment", null, new DelegateCommand(_ => AswPlanner.Resume(o))));
                     }
 
                     sub.Add(new ContextMenuItem("Cancel ASW pattern", null, new DelegateCommand(_ => AswPlanner.Cancel(o))));
