@@ -515,13 +515,63 @@ namespace ASWAutoHunt
             }
 
             int at = 0;
+            int[][] sets = new int[m][];
             foreach (int c in bestPerm)
             {
-                foreach (int k in bandTime(c, bestSign, bestIdx, at, bestCounts[c]).order) shares[c].Add(pattern[k]);
+                sets[c] = bandTime(c, bestSign, bestIdx, at, bestCounts[c]).order;
                 at += bestCounts[c];
             }
 
-            ModLog.Event($"  coordination split: est. finish {(bestTime < 1e8 ? bestTime : 0):0.00} h; " + string.Join(", ", Enumerable.Range(0, m).Select(c => $"carrier{c}={shares[c].Count}")));
+            // Rebalance: repeatedly move one point from the slowest aircraft to whichever aircraft lets the pair finish
+            // soonest, as long as the group's finish time improves. Fixes bottlenecks the contiguous bands cannot.
+            Func<int, int[], double> timeOf = (c, pts) =>
+                pts.Length == 0 ? 0 : routeFor(c, pts).len / Math.Max(30f, carriers[c].SpeedKts) + pts.Length * DropSecPerBuoy / 3600.0;
+            double[] times = new double[m];
+            for (int c = 0; c < m; c++) times[c] = timeOf(c, sets[c]);
+            double before = times.Max();
+            int moved = 0;
+            for (int iter = 0; iter < 60; iter++)
+            {
+                int slow = Array.IndexOf(times, times.Max());
+                double cur = times[slow];
+                double bestMax = cur - 1e-4;
+                int bestPoint = -1, bestTo = -1;
+                double bestSlowT = 0, bestToT = 0;
+                for (int pi = 0; pi < sets[slow].Length; pi++)
+                {
+                    int[] rest = sets[slow].Where((_, i) => i != pi).ToArray();
+                    double slowT = timeOf(slow, rest);
+                    for (int c2 = 0; c2 < m; c2++)
+                    {
+                        if (c2 == slow || sets[c2].Length >= carriers[c2].Buoys) continue;
+                        double toT = timeOf(c2, sets[c2].Concat(new[] { sets[slow][pi] }).ToArray());
+                        double pairMax = Math.Max(slowT, toT);
+                        if (pairMax < bestMax)
+                        {
+                            bestMax = pairMax;
+                            bestPoint = pi;
+                            bestTo = c2;
+                            bestSlowT = slowT;
+                            bestToT = toT;
+                        }
+                    }
+                }
+
+                if (bestPoint < 0) break;
+                int pt = sets[slow][bestPoint];
+                sets[slow] = sets[slow].Where((_, i) => i != bestPoint).ToArray();
+                sets[bestTo] = sets[bestTo].Concat(new[] { pt }).ToArray();
+                times[slow] = bestSlowT;
+                times[bestTo] = bestToT;
+                moved++;
+            }
+
+            for (int c = 0; c < m; c++)
+            {
+                foreach (int k in (moved > 0 ? routeFor(c, sets[c]).order : sets[c])) shares[c].Add(pattern[k]);
+            }
+
+            ModLog.Event($"  coordination split: est. finish {(bestTime < 1e8 ? bestTime : 0):0.00} h (bands) -> {times.Max():0.00} h after rebalance ({moved} points moved, was {before:0.00}); " + string.Join(", ", Enumerable.Range(0, m).Select(c => $"carrier{c}={shares[c].Count} ({times[c]:0.00} h)")));
             return shares;
         }
 
