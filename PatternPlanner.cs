@@ -368,29 +368,88 @@ namespace ASWAutoHunt
             double ax = Math.Cos(theta), ay = Math.Sin(theta);
             double[] proj = new double[n];
             for (int i = 0; i < n; i++) proj[i] = px[i] * ax + py[i] * ay;
+            double[] cxs = new double[m], cys = new double[m];
             double[] cproj = new double[m];
             for (int c = 0; c < m; c++)
             {
-                ToNm(carriers[c].Pos, refLat, out double cx, out double cy);
-                cproj[c] = cx * ax + cy * ay;
+                ToNm(carriers[c].Pos, refLat, out cxs[c], out cys[c]);
+                cproj[c] = cxs[c] * ax + cys[c] * ay;
             }
 
-            // Time for carrier c to place the points idx[pos..pos+len): fly to the nearer end of its path, then along it.
-            Func<int, int[], int, int, (double time, bool rev)> bandTime = (c, idx, pos, len) =>
+            // Best visiting order for a set of points starting from carrier c's own position: nearest neighbour, then 2-opt
+            // to remove crossing legs (open path, fixed start). Returns the order and its length in nm.
+            Func<int, int[], (int[] order, double len)> routeFor = (c, pts) =>
             {
-                if (len <= 0) return (0, false);
-                int[] seq = new int[len];
-                Array.Copy(idx, pos, seq, 0, len);
-                Array.Sort(seq);
-                double path = 0;
-                for (int k = 1; k < len; k++) path += DistNm(pattern[seq[k - 1]].Pos, pattern[seq[k]].Pos);
-                double dFirst = DistNm(carriers[c].Pos, pattern[seq[0]].Pos), dLast = DistNm(carriers[c].Pos, pattern[seq[len - 1]].Pos);
-                bool rev = dLast < dFirst;
-                return ((Math.Min(dFirst, dLast) + path) / Math.Max(30f, carriers[c].SpeedKts) + len * DropSecPerBuoy / 3600.0, rev);
+                int k = pts.Length;
+                int[] ord = new int[k];
+                bool[] used = new bool[k];
+                double cx = cxs[c], cy = cys[c];
+                for (int s = 0; s < k; s++)
+                {
+                    int bi = -1;
+                    double bd = double.MaxValue;
+                    for (int j = 0; j < k; j++)
+                    {
+                        if (used[j]) continue;
+                        double d = Math.Sqrt((px[pts[j]] - cx) * (px[pts[j]] - cx) + (py[pts[j]] - cy) * (py[pts[j]] - cy));
+                        if (d < bd) { bd = d; bi = j; }
+                    }
+
+                    used[bi] = true;
+                    ord[s] = pts[bi];
+                    cx = px[pts[bi]];
+                    cy = py[pts[bi]];
+                }
+
+                Func<int, int, double> dist = (a, b) =>
+                {
+                    double ax2 = a < 0 ? cxs[c] : px[a], ay2 = a < 0 ? cys[c] : py[a];
+                    return Math.Sqrt((px[b] - ax2) * (px[b] - ax2) + (py[b] - ay2) * (py[b] - ay2));
+                };
+
+                bool improved = true;
+                for (int pass = 0; improved && pass < 20; pass++)
+                {
+                    improved = false;
+                    for (int i = 0; i < k - 1; i++)
+                    {
+                        for (int j = i + 1; j < k; j++)
+                        {
+                            int before = i == 0 ? -1 : ord[i - 1];
+                            double oldE = dist(before, ord[i]) + (j + 1 < k ? dist(ord[j], ord[j + 1]) : 0);
+                            double newE = dist(before, ord[j]) + (j + 1 < k ? dist(ord[i], ord[j + 1]) : 0);
+                            if (newE < oldE - 1e-6)
+                            {
+                                Array.Reverse(ord, i, j - i + 1);
+                                improved = true;
+                            }
+                        }
+                    }
+                }
+
+                double len = k == 0 ? 0 : dist(-1, ord[0]);
+                for (int i = 1; i < k; i++) len += dist(ord[i - 1], ord[i]);
+                return (ord, len);
+            };
+
+            // Time for carrier c to place the points idx[pos..pos+len) along its own best route; memoised for the search.
+            Dictionary<(int, int, int, int), (double, int[])> memo = new Dictionary<(int, int, int, int), (double, int[])>();
+            Func<int, int, int[], int, int, (double time, int[] order)> bandTime = (c, sgn, idx, pos, len) =>
+            {
+                if (len <= 0) return (0, new int[0]);
+                var key = (c, sgn, pos, len);
+                if (memo.TryGetValue(key, out var hit)) return (hit.Item1, hit.Item2);
+                int[] pts = new int[len];
+                Array.Copy(idx, pos, pts, 0, len);
+                var (order, nm) = routeFor(c, pts);
+                double t = nm / Math.Max(30f, carriers[c].SpeedKts) + len * DropSecPerBuoy / 3600.0;
+                memo[key] = (t, order);
+                return (t, order);
             };
 
             double bestTime = double.MaxValue;
             int[] bestCounts = null, bestPerm = null, bestIdx = null;
+            int bestSign = 1;
             foreach (int sign in new[] { 1, -1 })
             {
                 int[] idx = Enumerable.Range(0, n).OrderBy(i => sign * proj[i]).ToArray();
@@ -409,7 +468,7 @@ namespace ASWAutoHunt
                             while (lo2 < hi2)
                             {
                                 int mid2 = (lo2 + hi2 + 1) / 2;
-                                if (bandTime(c, idx, pos, mid2).time <= T) lo2 = mid2; else hi2 = mid2 - 1;
+                                if (bandTime(c, sign, idx, pos, mid2).time <= T) lo2 = mid2; else hi2 = mid2 - 1;
                             }
 
                             counts[c] = lo2;
@@ -434,6 +493,7 @@ namespace ASWAutoHunt
                         bestCounts = (int[])counts.Clone();
                         bestPerm = perm;
                         bestIdx = idx;
+                        bestSign = sign;
                     }
                 }
             }
@@ -450,17 +510,14 @@ namespace ASWAutoHunt
                     bestCounts[c] = Math.Min(carriers[c].Buoys, left);
                     left -= bestCounts[c];
                 }
+
+                bestSign = 1;
             }
 
             int at = 0;
             foreach (int c in bestPerm)
             {
-                bool rev = bandTime(c, bestIdx, at, bestCounts[c]).rev;
-                int[] seq = new int[bestCounts[c]];
-                Array.Copy(bestIdx, at, seq, 0, seq.Length);
-                Array.Sort(seq);
-                if (rev) Array.Reverse(seq);
-                foreach (int k in seq) shares[c].Add(pattern[k]);
+                foreach (int k in bandTime(c, bestSign, bestIdx, at, bestCounts[c]).order) shares[c].Add(pattern[k]);
                 at += bestCounts[c];
             }
 
