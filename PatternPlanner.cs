@@ -341,8 +341,8 @@ namespace ASWAutoHunt
             public int Buoys;
         }
 
-        // Splits a pattern between carriers using each one's own position, speed and buoy count, aiming for an even finish
-        // time. Limited to the buoys each carries, so an aircraft that runs out hands the remainder to the others.
+        // Splits a pattern between carriers using each one's own position, speed and buoy count, aiming for the earliest
+        // finish. Limited to the buoys each carries, so an aircraft that runs out hands the remainder to the others.
         public static List<List<PlannedBuoy>> Split(List<PlannedBuoy> pattern, List<Carrier> carriers)
         {
             int n = pattern.Count, m = carriers.Count;
@@ -350,47 +350,141 @@ namespace ASWAutoHunt
             for (int i = 0; i < m; i++) shares.Add(new List<PlannedBuoy>());
             if (n == 0 || m == 0) return shares;
 
-            // Each carrier has a running clock (hours) and a tail position, both starting at its own actual location.
-            // Repeatedly give the (carrier, point) pair that finishes soonest: a close or fast aircraft takes points until
-            // its clock catches up with the others, so work balances by real position, speed and buoys left.
-            double[] clock = new double[m];
-            GeoPosition[] tail = carriers.Select(c => c.Pos).ToArray();
-            int[] left = carriers.Select(c => c.Buoys).ToArray();
-            List<int>[] mine = new List<int>[m];
-            for (int i = 0; i < m; i++) mine[i] = new List<int>();
-            bool[] taken = new bool[n];
-            for (int done = 0; done < n; done++)
+            // Spatial bands: project the points on the pattern's long axis, cut that ordering into one contiguous band per
+            // carrier (so each aircraft gets a compact region, not scattered points), and pick the carrier-to-band assignment
+            // and band sizes that make the last buoy go down soonest given each aircraft's real position, speed and buoys.
+            double refLat = carriers.Average(c => c.Pos._latitude);
+            double[] px = new double[n], py = new double[n];
+            for (int i = 0; i < n; i++) ToNm(pattern[i].Pos, refLat, out px[i], out py[i]);
+            double mx = px.Average(), my = py.Average(), sxx = 0, syy = 0, sxy = 0;
+            for (int i = 0; i < n; i++)
             {
-                int bc = -1, bp = -1;
-                double best = double.MaxValue;
-                for (int c = 0; c < m; c++)
-                {
-                    if (left[c] < 1) continue;
-                    double speed = Math.Max(30f, carriers[c].SpeedKts);
-                    for (int p = 0; p < n; p++)
-                    {
-                        if (taken[p]) continue;
-                        double t = clock[c] + DistNm(tail[c], pattern[p].Pos) / speed + DropSecPerBuoy / 3600.0;
-                        if (t < best) { best = t; bc = c; bp = p; }
-                    }
-                }
-
-                if (bc < 0) break; // every carrier is out of buoys
-                taken[bp] = true;
-                clock[bc] = best;
-                tail[bc] = pattern[bp].Pos;
-                left[bc]--;
-                mine[bc].Add(bp);
+                sxx += (px[i] - mx) * (px[i] - mx);
+                syy += (py[i] - my) * (py[i] - my);
+                sxy += (px[i] - mx) * (py[i] - my);
             }
 
-            // Each aircraft flies its own points in the original pattern order, which keeps the chunk structure.
+            double theta = 0.5 * Math.Atan2(2 * sxy, sxx - syy);
+            double ax = Math.Cos(theta), ay = Math.Sin(theta);
+            double[] proj = new double[n];
+            for (int i = 0; i < n; i++) proj[i] = px[i] * ax + py[i] * ay;
+            double[] cproj = new double[m];
             for (int c = 0; c < m; c++)
             {
-                mine[c].Sort();
-                foreach (int k in mine[c]) shares[c].Add(pattern[k]);
+                ToNm(carriers[c].Pos, refLat, out double cx, out double cy);
+                cproj[c] = cx * ax + cy * ay;
             }
 
+            // Time for carrier c to place the points idx[pos..pos+len): fly to the nearer end of its path, then along it.
+            Func<int, int[], int, int, (double time, bool rev)> bandTime = (c, idx, pos, len) =>
+            {
+                if (len <= 0) return (0, false);
+                int[] seq = new int[len];
+                Array.Copy(idx, pos, seq, 0, len);
+                Array.Sort(seq);
+                double path = 0;
+                for (int k = 1; k < len; k++) path += DistNm(pattern[seq[k - 1]].Pos, pattern[seq[k]].Pos);
+                double dFirst = DistNm(carriers[c].Pos, pattern[seq[0]].Pos), dLast = DistNm(carriers[c].Pos, pattern[seq[len - 1]].Pos);
+                bool rev = dLast < dFirst;
+                return ((Math.Min(dFirst, dLast) + path) / Math.Max(30f, carriers[c].SpeedKts) + len * DropSecPerBuoy / 3600.0, rev);
+            };
+
+            double bestTime = double.MaxValue;
+            int[] bestCounts = null, bestPerm = null, bestIdx = null;
+            foreach (int sign in new[] { 1, -1 })
+            {
+                int[] idx = Enumerable.Range(0, n).OrderBy(i => sign * proj[i]).ToArray();
+                IEnumerable<int[]> perms = m <= 4
+                    ? Permutations(m)
+                    : new[] { Enumerable.Range(0, m).OrderBy(c => sign * cproj[c]).ToArray() };
+                foreach (int[] perm in perms)
+                {
+                    int[] counts = new int[m];
+                    Func<double, bool> feasible = T =>
+                    {
+                        int pos = 0;
+                        foreach (int c in perm)
+                        {
+                            int lo2 = 0, hi2 = Math.Min(carriers[c].Buoys, n - pos);
+                            while (lo2 < hi2)
+                            {
+                                int mid2 = (lo2 + hi2 + 1) / 2;
+                                if (bandTime(c, idx, pos, mid2).time <= T) lo2 = mid2; else hi2 = mid2 - 1;
+                            }
+
+                            counts[c] = lo2;
+                            pos += lo2;
+                        }
+
+                        return pos >= n;
+                    };
+
+                    double lo = 0, hi = 500;
+                    if (!feasible(hi)) continue; // not enough buoys in this group for the whole pattern
+                    for (int it = 0; it < 25; it++)
+                    {
+                        double mid = (lo + hi) / 2;
+                        if (feasible(mid)) hi = mid; else lo = mid;
+                    }
+
+                    feasible(hi);
+                    if (hi < bestTime)
+                    {
+                        bestTime = hi;
+                        bestCounts = (int[])counts.Clone();
+                        bestPerm = perm;
+                        bestIdx = idx;
+                    }
+                }
+            }
+
+            if (bestCounts == null)
+            {
+                // Not enough buoys for everything: bands in carrier-projection order, each as full as it can be.
+                bestIdx = Enumerable.Range(0, n).OrderBy(i => proj[i]).ToArray();
+                bestPerm = Enumerable.Range(0, m).OrderBy(c => cproj[c]).ToArray();
+                bestCounts = new int[m];
+                int left = n;
+                foreach (int c in bestPerm)
+                {
+                    bestCounts[c] = Math.Min(carriers[c].Buoys, left);
+                    left -= bestCounts[c];
+                }
+            }
+
+            int at = 0;
+            foreach (int c in bestPerm)
+            {
+                bool rev = bandTime(c, bestIdx, at, bestCounts[c]).rev;
+                int[] seq = new int[bestCounts[c]];
+                Array.Copy(bestIdx, at, seq, 0, seq.Length);
+                Array.Sort(seq);
+                if (rev) Array.Reverse(seq);
+                foreach (int k in seq) shares[c].Add(pattern[k]);
+                at += bestCounts[c];
+            }
+
+            ModLog.Event($"  coordination split: est. finish {(bestTime < 1e8 ? bestTime : 0):0.00} h; " + string.Join(", ", Enumerable.Range(0, m).Select(c => $"carrier{c}={shares[c].Count}")));
             return shares;
+        }
+
+        private static IEnumerable<int[]> Permutations(int m)
+        {
+            int[] a = Enumerable.Range(0, m).ToArray();
+            List<int[]> res = new List<int[]>();
+            void Rec(int k)
+            {
+                if (k == m) { res.Add((int[])a.Clone()); return; }
+                for (int i = k; i < m; i++)
+                {
+                    (a[k], a[i]) = (a[i], a[k]);
+                    Rec(k + 1);
+                    (a[k], a[i]) = (a[i], a[k]);
+                }
+            }
+
+            Rec(0);
+            return res;
         }
 
         public const float OnPathToleranceNm = 1.0f; // a later buoy this close to a leg is dropped while passing over it
