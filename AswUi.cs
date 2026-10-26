@@ -154,8 +154,61 @@ namespace ASWAutoHunt
             return new PatternPlanner.Route(pts);
         }
 
+        // What the player asked for, kept while any participant still has drops queued so that sharing the pattern with
+        // another aircraft afterwards can recompute the whole layout.
+        private sealed class Request
+        {
+            public PatternKind Kind;
+            public float WidthNm;
+            public GeoPosition Datum;
+            public ObjectBase Fleet;
+            public float Heading;
+            public GeoPosition? Second;
+            public int Dropped;                                              // buoys already placed by earlier versions of this layout
+            public readonly HashSet<ObjectBase> Members = new HashSet<ObjectBase>();
+        }
+
+        private static readonly Dictionary<ObjectBase, Request> Requests = new Dictionary<ObjectBase, Request>();
+
         public static void Assign(ObjectBase src, PatternKind kind, float widthNm, GeoPosition datum, ObjectBase fleet, float gridHeading = 90f, GeoPosition? second = null)
         {
+            Request r = new Request { Kind = kind, WidthNm = widthNm, Datum = datum, Fleet = fleet, Heading = gridHeading, Second = second };
+            Requests[src] = r;
+            Run(src, r);
+        }
+
+        // Recompute the active layout for src with its current partner set (called when a partner is added or removed).
+        private static void Replan(ObjectBase src)
+        {
+            if (!Requests.TryGetValue(src, out Request r)) return;
+            foreach (ObjectBase m in r.Members)
+            {
+                if (Plans.TryGetValue(m, out Plan p)) r.Dropped += p.Dropped;
+            }
+
+            ModLog.Event($"ASW replan: {src.getUIDAndName()} partners={PartnerCount(src)} already_placed={r.Dropped}");
+            Run(src, r);
+        }
+
+        // Forget finished requests: nobody involved has a plan any more.
+        private static void ReleaseIfIdle()
+        {
+            foreach (var kv in Requests.ToList())
+            {
+                if (kv.Value.Members.Any(m => Plans.ContainsKey(m))) continue;
+                Requests.Remove(kv.Key);
+                Partners.Remove(kv.Key);
+            }
+        }
+
+        private static void Run(ObjectBase src, Request req)
+        {
+            PatternKind kind = req.Kind;
+            float widthNm = req.WidthNm;
+            GeoPosition datum = req.Datum;
+            ObjectBase fleet = req.Fleet;
+            float gridHeading = req.Heading;
+            GeoPosition? second = req.Second;
             try
             {
                 int have = PickAmmo(src, out string ammo);
@@ -177,9 +230,9 @@ namespace ASWAutoHunt
                     budget += n;
                 }
 
-                budget = Math.Min(budget, MaxBuoysPerPattern * group.Count);
-                ClearPartners(src);
-
+                foreach (ObjectBase g in group) req.Members.Add(g);
+                // Buoys placed by an earlier version of this layout count toward its size; deconfliction then skips them.
+                budget = Math.Min(budget + req.Dropped, MaxBuoysPerPattern * group.Count);
                 // Lay the pattern out for the shortest-range buoy in the group so coverage holds whichever aircraft
                 // places each point; longer-range buoys are used to thin points they already cover (see ThinForRange).
                 foreach (string a in ammos)
@@ -321,24 +374,85 @@ namespace ASWAutoHunt
         // Assumed patrol speed: a fraction of max forward speed, never below a hover-ish floor.
         public static float CruiseKnots(ObjectBase o) => Math.Max(60f, o.MaxForwardSpeedInKnots * 0.7f);
 
-        public static bool IsPartner(ObjectBase src, ObjectBase o) => Partners.TryGetValue(src, out var s) && s.Contains(o);
+        // Formation mates the player has explicitly opted out of the shared pattern.
+        private static readonly Dictionary<ObjectBase, HashSet<ObjectBase>> Excluded = new Dictionary<ObjectBase, HashSet<ObjectBase>>();
 
+        // Every member of src's formation (other than src) that currently carries buoys.
+        private static IEnumerable<ObjectBase> FormationMates(ObjectBase src)
+        {
+            UnitFormation f = src.Formation;
+            if (f?.Stations == null) yield break;
+            foreach (Station st in f.Stations.ToList())
+            {
+                ObjectBase m = st?.UnitObject;
+                if (m != null && m != src) yield return m;
+            }
+        }
+
+        public static bool IsPartner(ObjectBase src, ObjectBase o)
+        {
+            if (Excluded.TryGetValue(src, out var ex) && ex.Contains(o)) return false;
+            return (Partners.TryGetValue(src, out var s) && s.Contains(o)) || FormationMates(src).Contains(o);
+        }
+
+        // Sharing joins the partner to src's formation when the game allows it (same aircraft class); mixed
+        // fixed-wing/helicopter pairs stay in their own formations and are linked here instead. Each member
+        // is still given its own queued drops by Run/Launch.
         public static void TogglePartner(ObjectBase src, ObjectBase o)
         {
             if (!Partners.TryGetValue(src, out var s)) Partners[src] = s = new HashSet<ObjectBase>();
-            if (!s.Remove(o)) s.Add(o);
-            src.ShowOrderFeedback($"ASW coordination: {s.Count} other aircraft will share the next pattern");
+            if (!Excluded.TryGetValue(src, out var ex)) Excluded[src] = ex = new HashSet<ObjectBase>();
+            bool wasOn = IsPartner(src, o);
+            if (wasOn)
+            {
+                s.Remove(o);
+                ex.Add(o);
+                Cancel(o, silent: false);
+            }
+            else
+            {
+                ex.Remove(o);
+                s.Add(o);
+                JoinFormation(src, o);
+            }
+
+            src.ShowOrderFeedback($"ASW coordination: {PartnersOf(src).Count()} other aircraft share the pattern");
+            if (Requests.ContainsKey(src)) Replan(src);
         }
 
-        public static void ClearPartners(ObjectBase src) => Partners.Remove(src);
-        public static int PartnerCount(ObjectBase src) => Partners.TryGetValue(src, out var s) ? s.Count : 0;
+        private static void JoinFormation(ObjectBase src, ObjectBase o)
+        {
+            try
+            {
+                if (o.Formation != null && o.Formation == src.Formation) return;
+                if (!UnitFormation.CheckFormationJoin(src, o)) return;
+                if (src.Formation == null)
+                {
+                    src.Formation = new UnitFormation(new UnitFormationParameters(src._type == ObjectBase.ObjectType.Aircraft) { _leaderObject = src });
+                }
+
+                src.Formation.AddUnit(o);
+                ModLog.Event($"ASW: {o.getUIDAndName()} added to formation of {src.getUIDAndName()}");
+            }
+            catch (Exception ex)
+            {
+                ModLog.Error("AswPlanner.JoinFormation", ex);
+            }
+        }
+
+        public static void ClearPartners(ObjectBase src) { Partners.Remove(src); Excluded.Remove(src); }
+        public static int PartnerCount(ObjectBase src) => PartnersOf(src).Count();
 
         private static IEnumerable<ObjectBase> PartnersOf(ObjectBase src)
         {
-            if (!Partners.TryGetValue(src, out var s)) yield break;
-            foreach (ObjectBase o in s.ToList())
+            HashSet<ObjectBase> seen = new HashSet<ObjectBase>();
+            IEnumerable<ObjectBase> all = FormationMates(src);
+            if (Partners.TryGetValue(src, out var s)) all = all.Concat(s.ToList());
+            Excluded.TryGetValue(src, out var ex);
+            foreach (ObjectBase o in all)
             {
-                if (o != null && !o.IsDestroyed && IsBuoyCarrier(o)) yield return o;
+                if (o == null || o == src || o.IsDestroyed || (ex != null && ex.Contains(o)) || !IsBuoyCarrier(o) || !seen.Add(o)) continue;
+                yield return o;
             }
         }
 
@@ -477,6 +591,18 @@ namespace ASWAutoHunt
                     src.ShowOrderFeedback("ASW pattern cancelled");
                 }
             }
+
+            // A manual cancel on the requester ends the whole shared pattern.
+            if (!silent && Requests.TryGetValue(src, out Request req))
+            {
+                    Requests.Remove(src);
+                    foreach (ObjectBase m in req.Members.ToList())
+                    {
+                        if (m != src && Plans.ContainsKey(m)) Cancel(m, silent: false);
+                    }
+
+                    ClearPartners(src);
+            }
         }
 
         // Logs and removes the first n points as dropped (detected within ProgressCheckSec of the release).
@@ -534,6 +660,7 @@ namespace ASWAutoHunt
                 {
                     ClearMarkers(plan, plan.Markers.Count);
                     Plans.Remove(o);
+                    ReleaseIfIdle();
                     return;
                 }
 
@@ -547,13 +674,14 @@ namespace ASWAutoHunt
                         ModLog.Event($"ASW pattern complete: {o.getUIDAndName()} dropped={plan.Dropped}");
                         ClearMarkers(plan, plan.Markers.Count);
                         Plans.Remove(o);
+                        ReleaseIfIdle();
                         return;
                     }
 
                     LogDrops(o, plan, Math.Max(0, used));
                     ClearMarkers(plan, Math.Max(0, plan.Markers.Count - plan.Points.Count));
                     plan.Interrupted = true;
-                    o.ShowOrderFeedback($"ASW pattern interrupted, {plan.Points.Count} buoys unplaced (Orders > ASW Pattern > Resume)");
+                    o.ShowOrderFeedback($"ASW pattern interrupted, {plan.Points.Count} buoys unplaced (ASW Pattern > Resume)");
                     ModLog.Event($"ASW pattern interrupted: {o.getUIDAndName()} remaining={plan.Points.Count}");
                     return;
                 }
@@ -710,9 +838,14 @@ namespace ASWAutoHunt
             return base.MouseAction(v, args, mousePosition, map, ref handled);
         }
 
+        public static PatternKind LastKind = PatternKind.GridDatum;
+        public static float LastWidth = 0f;
+
         public static void Begin(ObjectBase src, PatternKind kind, float widthNm)
         {
             if (src == null || src.IsDestroyed) return;
+            LastKind = kind;
+            LastWidth = widthNm;
             src.ShowOrderFeedback(kind == PatternKind.GridDatum || kind == PatternKind.Ring ? "Right-click the pattern centre"
                 : kind == PatternKind.Line ? "Right-click the start of the line" : "Right-click the fleet ship whose route to screen");
             InteractionStateManager mgr = Globals._mainGameViewModel.StateManager;
@@ -720,11 +853,51 @@ namespace ASWAutoHunt
         }
     }
 
-    // Orders submenu: "ASW Pattern" with grid / corridor entries (only for units carrying buoys).
+    // Level-1 right-click entry "ASW Pattern" (only for flying units carrying buoys) and the bottom-bar button.
     [HarmonyPatch(typeof(ObjectBaseViewModel), "GetContextMenuItems")]
     public static class AswMenuPatch
     {
         private static readonly float[] CorridorWidths = { 20f, 40f, 60f, 80f, 100f };
+
+        // Shared by the context menu and the bottom bar. Partner entries relabel themselves so a static bar menu stays current.
+        public static TrulyObservableCollection<ContextMenuItem> BuildMenu(ObjectBase o, bool alwaysResume)
+        {
+            TrulyObservableCollection<ContextMenuItem> sub = new TrulyObservableCollection<ContextMenuItem>
+            {
+                new ContextMenuItem("Grid at datum", null, new DelegateCommand(_ => AswPickState.Begin(o, PatternKind.GridDatum, 0f))),
+                new ContextMenuItem("Grid along fleet route", null, new DelegateCommand(_ => AswPickState.Begin(o, PatternKind.GridRoute, 0f))),
+                new ContextMenuItem("Ring with infill", null, new DelegateCommand(_ => AswPickState.Begin(o, PatternKind.Ring, 0f))),
+                new ContextMenuItem("Straight line", null, new DelegateCommand(_ => AswPickState.Begin(o, PatternKind.Line, 0f)))
+            };
+            foreach (float w in CorridorWidths)
+            {
+                float width = w;
+                sub.Add(new ContextMenuItem($"Corridor {width:0} nm wide", null, new DelegateCommand(_ => AswPickState.Begin(o, PatternKind.Corridor, width))));
+            }
+
+            if (alwaysResume || AswPlanner.CanResume(o))
+            {
+                sub.Insert(0, new ContextMenuItem("Resume buoy deployment", null, new DelegateCommand(_ => { if (AswPlanner.CanResume(o)) AswPlanner.Resume(o); })));
+            }
+
+            foreach (ObjectBase partner in AswPlanner.CandidatePartners(o))
+            {
+                ObjectBase pp = partner;
+                AswPlanner.PickAmmo(pp, out string pAmmo);
+                int buoys = pp.getAmmunitionAmountByName(pAmmo);
+                ContextMenuItem item = null;
+                string Label() => $"{(AswPlanner.IsPartner(o, pp) ? "[x]" : "[ ]")} Share with {pp.getUIDAndName()} ({buoys} buoys)";
+                item = new ContextMenuItem(Label(), null, new DelegateCommand(_ =>
+                {
+                    AswPlanner.TogglePartner(o, pp);
+                    item.Label = Label();
+                }));
+                sub.Add(item);
+            }
+
+            sub.Add(new ContextMenuItem("Cancel ASW pattern", null, new DelegateCommand(_ => AswPlanner.Cancel(o))));
+            return sub;
+        }
 
         private static void Postfix(ObjectBase ____objectBase, TrulyObservableCollection<ContextMenuItem> __result)
         {
@@ -736,47 +909,41 @@ namespace ASWAutoHunt
                     return;
                 }
 
-                string ordersLabel = Singleton<LanguageResourceHandler>.Instance.getText("ContextMenu", "Orders");
-                foreach (ContextMenuItem item in __result)
-                {
-                    if (item?.Items == null || !string.Equals(item.Label as string, ordersLabel, StringComparison.Ordinal)) continue;
-
-                    TrulyObservableCollection<ContextMenuItem> sub = new TrulyObservableCollection<ContextMenuItem>
-                    {
-                        new ContextMenuItem("Grid at datum", null, new DelegateCommand(_ => AswPickState.Begin(o, PatternKind.GridDatum, 0f))),
-                        new ContextMenuItem("Grid along fleet route", null, new DelegateCommand(_ => AswPickState.Begin(o, PatternKind.GridRoute, 0f))),
-                        new ContextMenuItem("Ring with infill", null, new DelegateCommand(_ => AswPickState.Begin(o, PatternKind.Ring, 0f))),
-                        new ContextMenuItem("Straight line", null, new DelegateCommand(_ => AswPickState.Begin(o, PatternKind.Line, 0f)))
-                    };
-                    foreach (float w in CorridorWidths)
-                    {
-                        float width = w;
-                        sub.Add(new ContextMenuItem($"Corridor {width:0} nm wide", null, new DelegateCommand(_ => AswPickState.Begin(o, PatternKind.Corridor, width))));
-                    }
-
-                    if (AswPlanner.CanResume(o))
-                    {
-                        sub.Insert(0, new ContextMenuItem("Resume buoy deployment", null, new DelegateCommand(_ => AswPlanner.Resume(o))));
-                    }
-
-                    foreach (ObjectBase partner in AswPlanner.CandidatePartners(o))
-                    {
-                        ObjectBase pp = partner;
-                        AswPlanner.PickAmmo(pp, out string pAmmo);
-                        string mark = AswPlanner.IsPartner(o, pp) ? "[x]" : "[ ]";
-                        sub.Add(new ContextMenuItem($"{mark} Share with {pp.getUIDAndName()} ({pp.getAmmunitionAmountByName(pAmmo)} buoys)", null, new DelegateCommand(_ => AswPlanner.TogglePartner(o, pp))));
-                    }
-
-                    sub.Add(new ContextMenuItem("Cancel ASW pattern", null, new DelegateCommand(_ => AswPlanner.Cancel(o))));
-                    item.Items.Add(new ContextMenuItem("ASW Pattern", sub));
-                    return;
-                }
-
-                ModLog.Warn("AswMenuPatch: Orders submenu not found");
+                __result.Add(new ContextMenuItem("ASW Pattern", BuildMenu(o, false)));
             }
             catch (Exception ex)
             {
                 ModLog.Error("AswMenuPatch", ex);
+            }
+        }
+    }
+
+    // Bottom bar: left-click starts the last-used pattern, the flyout holds the full menu.
+    [HarmonyPatch(typeof(ObjectEffectorsViewModel), MethodType.Constructor, new[] { typeof(ObjectBase), typeof(bool) })]
+    public static class AswBottomBarPatch
+    {
+        private static void Postfix(ObjectEffectorsViewModel __instance, ObjectBase objectBase, bool isWaypointEdit)
+        {
+            try
+            {
+                if (isWaypointEdit || objectBase == null || !(objectBase.IsPlayerObject || Globals.AllowControlOfEnemyUnits.Value) || !AswPlanner.IsBuoyCarrier(objectBase))
+                {
+                    return;
+                }
+
+                int count = AswPlanner.PickAmmo(objectBase, out _);
+                var entry = new WeaponEntry(objectBase, BaseSystem.SystemType.Generic)
+                {
+                    Label = "ASW",
+                    Command = new DelegateCommand((object _) => AswPickState.Begin(objectBase, AswPickState.LastKind, AswPickState.LastWidth)),
+                    Items = AswMenuPatch.BuildMenu(objectBase, true)
+                };
+                entry.AmmoAmount = count;
+                __instance.WeaponEntries.Add(entry);
+            }
+            catch (Exception ex)
+            {
+                ModLog.Error("AswBottomBarPatch", ex);
             }
         }
     }
