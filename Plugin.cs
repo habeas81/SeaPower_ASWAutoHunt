@@ -69,6 +69,22 @@ namespace ASWAutoHunt
             }
 
             ModLog.Info($"Patching complete: {ok} ok, {failed} failed.");
+            Perf.Init(harmony, ReadPerfConfig());
+        }
+
+        // Opt-in profiler switch: BepInEx\config\<plugin guid>.cfg, [Logging] PerfMonitor (default false).
+        private static bool ReadPerfConfig()
+        {
+            try
+            {
+                var cfg = new BepInEx.Configuration.ConfigFile(System.IO.Path.Combine(BepInEx.Paths.ConfigPath, PLUGIN_GUID + ".cfg"), true);
+                return cfg.Bind("Logging", "PerfMonitor", false,
+                    "Time every patch method and log a PERF summary every 30 s (frame times, GC, slowest patches). Small overhead; use to find lag.").Value;
+            }
+            catch
+            {
+                return false;
+            }
         }
     }
 }

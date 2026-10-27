@@ -30,8 +30,9 @@ namespace ASWAutoHunt
         public const float DefaultNominalKm = 10f;        // used for buoys not in the table below
 
         public const float GridRouteHalfWidthNm = 12f;    // swath half-width for "grid along route"
-        public const float GridLeadNm = 15f;              // start the swath this far ahead of the fleet so buoys are down before it arrives
-        public const float CorridorLeadNm = 15f;
+        public const float GridLeadNm = 5f;               // start the swath this far ahead of the fleet so buoys are down before it arrives
+        public const float CorridorLeadNm = 5f;
+        public const float LandHeightM = 1f;              // terrain higher than this above sea level counts as land
         public const float CorridorLengthNm = 80f;        // maximum length of the screen; shortened to fit the buoys carried
         public const int CorridorCentrelineEvery = 2;     // centreline buoy at every Nth station (sparser than the walls)
         public const bool CorridorEndCap = true;
@@ -62,6 +63,16 @@ namespace ASWAutoHunt
         private static float Clamp(float v) => Math.Max(MinSpacingNm, Math.Min(MaxSpacingNm, v));
 
         public static float DistNm(GeoPosition a, GeoPosition b) => (float)a.GetDistance(b) * NmPerUnit;
+
+        // True if the terrain at p is above sea level. Positions with no loaded terrain data read as deep water
+        // (-10000 m), so they are kept rather than dropped.
+        public static bool IsLand(GeoPosition p) => TerrainUtils.GetRealHeightInMetersAt(p) > LandHeightM;
+
+        // Removes planned points that fall on land; returns how many were removed.
+        public static int RemoveLand(List<PlannedBuoy> pattern)
+        {
+            return pattern.RemoveAll(b => IsLand(b.Pos));
+        }
 
         // ---- Route helper: a polyline with distance-along-track lookup, extended straight past its last leg. ----
         public sealed class Route
@@ -122,12 +133,19 @@ namespace ASWAutoHunt
 
         // Hexagonal area grid centred on a datum, up to maxBuoys points, flown row by row (boustrophedon). Rows run along
         // rowHeading (default 90 = east-west rows, north-aligned grid) and stack to the left of that heading.
-        public static List<PlannedBuoy> GridAtDatum(GeoPosition datum, string ammoFile, int maxBuoys, float rowHeading = 90f)
+        // With radiusNm > 0 the grid fills that circle (the one the player drags out); if the buoys cannot fill it, the
+        // outermost points are dropped so the pattern stays compact around the centre.
+        public static List<PlannedBuoy> GridAtDatum(GeoPosition datum, string ammoFile, int maxBuoys, float rowHeading = 90f, float radiusNm = 0f)
         {
             List<PlannedBuoy> res = new List<PlannedBuoy>();
             if (maxBuoys < 1) return res;
             float d = HexSpacingNm(ammoFile);
             float rowStep = d * 0.866f;
+            if (radiusNm >= d * 0.5f)
+            {
+                return GridInCircle(datum, d, rowStep, maxBuoys, rowHeading, radiusNm);
+            }
+
             int cols = (int)Math.Ceiling(Math.Sqrt(maxBuoys));
             int rows = (int)Math.Ceiling(maxBuoys / (double)cols);
             for (int r = 0; r < rows && res.Count < maxBuoys; r++)
@@ -147,6 +165,64 @@ namespace ASWAutoHunt
             return res;
         }
 
+        // Hex lattice clipped to a circle, flown boustrophedon row by row. Each point is (along, stack) from the datum.
+        private static List<PlannedBuoy> GridInCircle(GeoPosition datum, float d, float rowStep, int maxBuoys, float rowHeading, float radiusNm)
+        {
+            List<PlannedBuoy> res = new List<PlannedBuoy>();
+            int halfRows = (int)Math.Floor(radiusNm / rowStep);
+            List<List<(float along, float stack)>> rows = new List<List<(float, float)>>();
+            for (int r = -halfRows; r <= halfRows; r++)
+            {
+                float stack = r * rowStep;
+                float shift = (Math.Abs(r) % 2 == 1) ? d / 2f : 0f;
+                float span = (float)Math.Sqrt(Math.Max(0f, radiusNm * radiusNm - stack * stack));
+                int maxK = (int)Math.Ceiling((span + d) / d);
+                List<(float, float)> row = new List<(float, float)>();
+                for (int k = -maxK; k <= maxK; k++)
+                {
+                    float along = k * d + shift;
+                    if (along * along + stack * stack <= radiusNm * radiusNm)
+                    {
+                        row.Add((along, stack));
+                    }
+                }
+
+                rows.Add(row);
+            }
+
+            // Too many for the buoys carried: drop the points farthest from the centre.
+            int total = rows.Sum(x => x.Count);
+            if (total > maxBuoys)
+            {
+                float cut = rows.SelectMany(x => x).Select(p => p.along * p.along + p.stack * p.stack).OrderBy(v => v).ElementAt(maxBuoys - 1);
+                foreach (var row in rows)
+                {
+                    row.RemoveAll(p => p.along * p.along + p.stack * p.stack > cut);
+                }
+            }
+
+            bool forward = true;
+            foreach (var row in rows)
+            {
+                if (row.Count == 0)
+                {
+                    continue;
+                }
+
+                IEnumerable<(float along, float stack)> ordered = forward ? row : Enumerable.Reverse(row);
+                foreach (var (along, stack) in ordered)
+                {
+                    GeoPosition p = Lateral(datum.GeoOffsetByDistanceOnHeading(Math.Abs(along), along >= 0f ? rowHeading : rowHeading + 180f),
+                        rowHeading, -stack);
+                    res.Add(new PlannedBuoy { Pos = p, Tag = "G" });
+                }
+
+                forward = !forward;
+            }
+
+            return res;
+        }
+
         // Stations per chunk: thirds of the pattern, but no chunk longer than MaxChunkNm along the track.
         private static int ChunkSize(int stations, float stationSpacingNm)
         {
@@ -157,14 +233,16 @@ namespace ASWAutoHunt
         // Hexagonal swath centred on the route, starting GridLeadNm ahead of the fleet. Running out of buoys shortens the
         // far end rather than leaving holes. Flown in chunks like the corridor: up the left edge, across, down the right
         // edge, then back and forth through the interior lines before moving on to the next chunk.
-        public static List<PlannedBuoy> GridAlongRoute(Route route, string ammoFile, int maxBuoys)
+        // halfWidthNm <= 0 uses the default GridRouteHalfWidthNm.
+        public static List<PlannedBuoy> GridAlongRoute(Route route, string ammoFile, int maxBuoys, float halfWidthNm = 0f)
         {
             List<PlannedBuoy> res = new List<PlannedBuoy>();
             if (!route.Valid || maxBuoys < 1) return res;
+            if (halfWidthNm <= 0f) halfWidthNm = GridRouteHalfWidthNm;
             float d = HexSpacingNm(ammoFile);
             float rowStep = d * 0.866f;
             float stepNm = d / 2f; // half-spacing steps so alternate lines stagger
-            int lines = Math.Max(2, (int)Math.Floor(2f * GridRouteHalfWidthNm / rowStep) + 1);
+            int lines = Math.Max(2, (int)Math.Floor(2f * halfWidthNm / rowStep) + 1);
 
             // Lattice cell (station, line) is occupied when (station + line) is even.
             int stations = 0, used = 0;

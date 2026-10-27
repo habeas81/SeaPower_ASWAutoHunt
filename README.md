@@ -2,7 +2,7 @@
 
 Airborne anti-submarine automation for *Sea Power: Naval Combat in the Missile Age*. Pick a pattern, click the map, and your aircraft and helicopters lay out and drop a full sonobuoy field for you, efficiently and without gaps. Share the job with other aircraft and the mod splits the buoys between them.
 
-**Status: beta.** The pattern and coordination features below are playable. Automated contact response (fix and prosecute) is in development.
+**Status: beta.** The pattern and coordination features below are playable, and automatic contact response is included.
 
 ## Description
 
@@ -37,9 +37,13 @@ Need more aircraft on the job? Tick "Share with..." and the mod puts them in one
 - **Resume buoy deployment** if an accidental waypoint wipes the queue.
 - Map markers for queued buoys, removed as they are dropped.
 - A detailed log (`BepInEx\ASWAutoHunt.log`) of every planned and dropped buoy, to help with tuning and bug reports.
+- **Automatic contact response:** when a sonobuoy detects a submarine, the closest idle hunter pauses its pattern, drops a tight 3-buoy DICASS cluster on the contact, and assesses the fix. A good fix on a hostile contact is prosecuted automatically with a torpedo or depth charge; unknown contacts are fixed and reported only. The aircraft then resumes its pattern.
+- **Land filtering:** buoy positions over land are removed. Patterns that start from ships now begin within 5 nm ahead of them.
+- **Circle-sized grid:** the dragged placement circle sets the size of the grid.
+- **Width submenus:** grid and corridor widths along a fleet route, and the "Share with..." targets, are submenus.
+- Optional performance profiler: set `PerfMonitor = true` in `BepInEx\config\com.habeas81.seapower.aswautohunt.cfg` to log a `PERF` summary every 30 s.
 
 **Planned**
-- Automatic response to submarine contacts: fix with a tight cluster of active DICASS buoys, then prosecute with torpedoes or depth charges (with player confirmation unless weapons are free).
 - Ship evasion and torpedo defence.
 - Dipping sonar patterns for helicopters.
 
