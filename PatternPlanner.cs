@@ -42,7 +42,8 @@ namespace ASWAutoHunt
         public const float CorridorMaxWidthNm = 100f;
         public const float MaxLegSearchNm = 400f;         // safety cap on route length scanned
 
-        private const float NmPerUnit = 0.036285132f;     // 1 unity unit in nautical miles
+        private const double EarthRadiusMeters = 6378000.0;
+        private const double MetersPerNauticalMile = 1852.0;
 
         // Nominal passive/active range of the common buoys (km, from sensors.ini).
         public static float NominalKm(string ammoFile)
@@ -62,7 +63,18 @@ namespace ASWAutoHunt
 
         private static float Clamp(float v) => Math.Max(MinSpacingNm, Math.Min(MaxSpacingNm, v));
 
-        public static float DistNm(GeoPosition a, GeoPosition b) => (float)a.GetDistance(b) * NmPerUnit;
+        public static float DistNm(GeoPosition a, GeoPosition b)
+        {
+            double lat1 = a._latitude * Math.PI / 180.0;
+            double lat2 = b._latitude * Math.PI / 180.0;
+            double dLat = lat2 - lat1;
+            double dLon = (b._longitude - a._longitude) * Math.PI / 180.0;
+            double sinLat = Math.Sin(dLat * 0.5);
+            double sinLon = Math.Sin(dLon * 0.5);
+            double h = sinLat * sinLat + Math.Cos(lat1) * Math.Cos(lat2) * sinLon * sinLon;
+            h = Math.Max(0.0, Math.Min(1.0, h));
+            return (float)(2.0 * EarthRadiusMeters * Math.Asin(Math.Sqrt(h)) / MetersPerNauticalMile);
+        }
 
         // True if the terrain at p is above sea level. Positions with no loaded terrain data read as deep water
         // (-10000 m), so they are kept rather than dropped.
@@ -431,9 +443,9 @@ namespace ASWAutoHunt
             // Spatial bands: project the points on the pattern's long axis, cut that ordering into one contiguous band per
             // carrier (so each aircraft gets a compact region, not scattered points), and pick the carrier-to-band assignment
             // and band sizes that make the last buoy go down soonest given each aircraft's real position, speed and buoys.
-            double refLat = carriers.Average(c => c.Pos._latitude);
+            GeoPosition origin = carriers[0].Pos;
             double[] px = new double[n], py = new double[n];
-            for (int i = 0; i < n; i++) ToNm(pattern[i].Pos, refLat, out px[i], out py[i]);
+            for (int i = 0; i < n; i++) ToNm(pattern[i].Pos, origin, out px[i], out py[i]);
             double mx = px.Average(), my = py.Average(), sxx = 0, syy = 0, sxy = 0;
             for (int i = 0; i < n; i++)
             {
@@ -450,7 +462,7 @@ namespace ASWAutoHunt
             double[] cproj = new double[m];
             for (int c = 0; c < m; c++)
             {
-                ToNm(carriers[c].Pos, refLat, out cxs[c], out cys[c]);
+                ToNm(carriers[c].Pos, origin, out cxs[c], out cys[c]);
                 cproj[c] = cxs[c] * ax + cys[c] * ay;
             }
 
@@ -674,11 +686,13 @@ namespace ASWAutoHunt
 
         public const float OnPathToleranceNm = 1.0f; // a later buoy this close to a leg is dropped while passing over it
 
-        // Local flat-earth position in nm (fine for pattern-scale distances).
-        private static void ToNm(GeoPosition g, double refLat, out double x, out double y)
+        // Local tangent-plane position in nm, derived from great-circle range and initial bearing.
+        private static void ToNm(GeoPosition g, GeoPosition origin, out double x, out double y)
         {
-            y = (g._latitude - refLat) * 60.0;
-            x = g._longitude * 60.0 * Math.Cos(refLat * Math.PI / 180.0);
+            double distanceNm = DistNm(origin, g);
+            double bearingRad = origin.HeadingToPosition(g) * Math.PI / 180.0;
+            x = distanceNm * Math.Sin(bearingRad);
+            y = distanceNm * Math.Cos(bearingRad);
         }
 
         // Efficiency pass: when a leg A->B flies over a buoy point that is planned later, drop that buoy on the way
@@ -686,19 +700,18 @@ namespace ASWAutoHunt
         public static void PullOnPath(List<PlannedBuoy> pattern, GeoPosition from)
         {
             if (pattern.Count < 3) return;
-            double refLat = from._latitude;
             GeoPosition prev = from;
             for (int i = 0; i < pattern.Count - 1; i++)
             {
-                ToNm(prev, refLat, out double ax, out double ay);
-                ToNm(pattern[i].Pos, refLat, out double bx, out double by);
+                ToNm(prev, from, out double ax, out double ay);
+                ToNm(pattern[i].Pos, from, out double bx, out double by);
                 double dx = bx - ax, dy = by - ay, len2 = dx * dx + dy * dy;
                 if (len2 > 1e-6)
                 {
                     List<KeyValuePair<double, PlannedBuoy>> found = new List<KeyValuePair<double, PlannedBuoy>>();
                     for (int j = i + 1; j < pattern.Count; j++)
                     {
-                        ToNm(pattern[j].Pos, refLat, out double px, out double py);
+                        ToNm(pattern[j].Pos, from, out double px, out double py);
                         double t = ((px - ax) * dx + (py - ay) * dy) / len2;
                         if (t <= 0.0 || t >= 1.0) continue;
                         double cx = ax + t * dx - px, cy = ay + t * dy - py;

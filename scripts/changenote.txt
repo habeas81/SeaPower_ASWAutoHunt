@@ -1,0 +1,5 @@
+[b]v0.1.1 Beta[/b]
+[list]
+[*]Fixed: sonobuoy patterns now use true great-circle distances, so they lay out correctly with the Public Beta's 3D globe map, including at high latitude and across the date line.
+[*]The Public Beta needs the Anchor Chain (Beta Fix) Workshop item alongside Anchor Chain. See the description for install steps.
+[/list]

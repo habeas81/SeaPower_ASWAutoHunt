@@ -1,0 +1,74 @@
+[h1]ASW Find, Fix and Prosecute (v0.1.1 Beta)[/h1]
+
+Pick a pattern, click the map, and your aircraft and helicopters lay out and drop a full sonobuoy field for you, efficiently and without gaps. Share the job with other aircraft and the mod splits the buoys between them. When a buoy detects a submarine, your aircraft fix it with a tight DICASS cluster and can prosecute it.
+
+The mod works out buoy positions from the detection range of the buoys aboard and orders the drops so the aircraft flies an efficient track. It queues them using the game's own sonobuoy drop order.
+
+[b]REQUIRES: Anchor Chain[/b] (Workshop item 3380210757) [b]and, for the Sea Power Public Beta (3D globe map), Anchor Chain (Beta Fix)[/b] (Workshop item 3837690165).
+[olist]
+[*]Follow the install instructions for the core Anchor Chain mod: https://github.com/SeaPower-Modders/AnchorChain
+[*]Subscribe to Anchor Chain, then also subscribe to [b]Anchor Chain (Beta Fix)[/b]: https://steamcommunity.com/sharedfiles/filedetails/?id=3837690165 and follow the one-time preloader step on its page.
+[*]Enable Anchor Chain (Beta Fix) and this mod in the Mods menu, then restart the game.
+[/olist]
+
+[h2]Patch notes[/h2]
+[b]v0.1.1 Beta[/b]
+[list]
+[*][b]Fixed:[/b] pattern geometry now uses true great-circle distances, so patterns are laid out correctly with the Public Beta's 3D globe map, including at high latitude and across the date line.
+[*][b]Docs:[/b] Anchor Chain (Beta Fix) is now required on the Public Beta.
+[/list]
+[b]v0.1 Beta - 27 Oct 2026[/b]
+[list]
+[*][b]New: automatic contact response.[/b] When a sonobuoy detects a submarine, the closest idle hunter pauses its pattern, drops a tight 3-buoy DICASS cluster on the contact, and assesses the fix. A good fix on a hostile contact is prosecuted automatically with a torpedo or depth charge. Unknown contacts are fixed and reported only. The aircraft then resumes its pattern.
+[*][b]New:[/b] buoys are never placed over land.
+[*][b]New:[/b] ship-based patterns now start within 5 nm ahead of the ships.
+[*][b]New:[/b] the size of the circle you drag when placing sets the width of placement-based grids.
+[*][b]New:[/b] Grid along fleet route has a width choice of 10, 12, 15 or 20 nm each side. Corridor along fleet route offers 20 to 100 nm. Both are submenus.
+[*][b]New:[/b] "Share with..." is a submenu listing the partner aircraft and their buoy counts.
+[*][b]New:[/b] optional performance monitor. Set PerfMonitor = true in BepInEx\config\com.habeas81.seapower.aswautohunt.cfg to log a PERF summary every 30 s. Off by default.
+[/list]
+
+[h2]Features[/h2]
+[b]Patterns[/b]
+[list]
+[*]Grid at datum. The circle you drag sets its size, and a second click rotates it.
+[*]Grid along a fleet route, with a choice of width.
+[*]Corridor along a fleet route, 20-100 nm wide, perimeter first.
+[*]Ring with infill.
+[*]Straight line.
+[/list]
+[b]Smart layout[/b]
+[list]
+[*]Spacing comes from each buoy type's detection range.
+[*]It skips buoys already in the water or already queued.
+[*]Buoys over land are removed.
+[*]Drop order is optimised so the aircraft does not fly over a later drop point on the way to an earlier one.
+[*]Mixed buoy loads are handled.
+[/list]
+[b]Coordination[/b]
+[list]
+[*]Sharing puts the aircraft in one formation. Fixed-wing aircraft and helicopters can work one pattern together.
+[*]Buoys are split by each aircraft's position, speed and buoy count, then rebalanced.
+[*]Adding or removing an aircraft mid-pattern recomputes the layout and keeps buoys already placed.
+[/list]
+[b]Contact response[/b]
+[list]
+[*]Triggered by any sonobuoy-detected submarine contact, hostile or unknown.
+[*]The closest idle aircraft carrying at least 3 DICASS drops a tight cluster on the contact's last known position.
+[*]It assesses the fix, and attacks automatically only if the contact is hostile and the fix is good.
+[*]It then resumes its interrupted pattern.
+[/list]
+[b]Convenience[/b]
+[list]
+[*]"ASW Pattern" is on the level-1 right-click menu.
+[*]An "ASW" bottom-bar button: left-click repeats the last pattern, and the menu is available from there too.
+[*]"Resume buoy deployment" restores a wiped queue.
+[*]Map markers show queued buoys.
+[*]A detailed log (Sea Power\BepInEx\ASWAutoHunt.log) records every planned and dropped buoy, and every contact response.
+[/list]
+
+[h2]Status[/h2]
+[b]v0.1.1 Beta.[/b] Contact response has only been tested in a few missions, and the "good fix" threshold may need tuning. Please report bugs with your ASWAutoHunt.log attached.
+[b]Planned:[/b] ship evasion and torpedo defence, and dipping sonar patterns for helicopters.
+
+Compatible with Sea Power 0.8.7+ and the Public Beta (with Anchor Chain (Beta Fix)). MIT licensed. Not affiliated with the developers of Sea Power.

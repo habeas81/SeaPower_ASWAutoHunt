@@ -1,5 +1,6 @@
 {
   "appId": 1286220,
   "workshopItemId": 3827859308,
-  "contentFolder": "dist/ASWAutoHunt"
+  "contentFolder": "dist/ASWAutoHunt",
+  "descriptionFile": "scripts/workshop_description.txt"
 }
