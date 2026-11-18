@@ -6,7 +6,7 @@ The mod works out buoy positions from the detection range of the buoys aboard an
 
 [b]REQUIRES: Sea Power 0.9.0+ and Anchor Chain 1.2.0[/b] (Workshop item 3380210757).
 [olist]
-[*]Follow the install instructions for Anchor Chain, including the [b]1.2.0 preloader[/b] (ACPreloader.zip from https://github.com/SeaPower-Modders/AnchorChain/releases). Older preloaders, and the Anchor Chain (Beta Fix) preloader, do not start Anchor Chain 1.2.0 on Sea Power 0.9.0.
+[*]Follow the install instructions for Anchor Chain, including the [b]1.2.0 preloader[/b] (ACPreloader.zip from https://github.com/SeaPower-Modders/AnchorChain/releases). Older preloaders do not start Anchor Chain 1.2.0 on Sea Power 0.9.0.
 [*]Subscribe to Anchor Chain and this mod.
 [*]Enable Anchor Chain and this mod in the Mods menu, then restart the game.
 [/olist]
@@ -31,12 +31,11 @@ The mod works out buoy positions from the detection range of the buoys aboard an
 [list]
 [*][b]Fixed:[/b] updated for Sea Power 0.9.0. Assigning a pattern no longer fails with "Method not found: SetAttackAtWaypointTask".
 [*][b]Fixed:[/b] pattern geometry matches the new 3D globe map in the main game, including at high latitude and across the date line.
-[*][b]Docs:[/b] requires Sea Power 0.9.0+ and Anchor Chain 1.2.0 with its 1.2.0 preloader. Anchor Chain (Beta Fix) is no longer needed.
+[*][b]Docs:[/b] requires Sea Power 0.9.0+ and Anchor Chain 1.2.0 with its 1.2.0 preloader.
 [/list]
 [b]v0.1.1 Beta[/b]
 [list]
 [*][b]Fixed:[/b] pattern geometry now uses true great-circle distances, so patterns are laid out correctly with the Public Beta's 3D globe map, including at high latitude and across the date line.
-[*][b]Docs:[/b] Anchor Chain (Beta Fix) is now required on the Public Beta.
 [/list]
 [b]v0.1 Beta - 27 Oct 2026[/b]
 [list]

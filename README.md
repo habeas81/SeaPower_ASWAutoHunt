@@ -57,7 +57,7 @@ Need more aircraft on the job? Tick "Share with..." and the mod puts them in one
 
 ## Requirements
 
-- Sea Power 0.9.0+, [Anchor Chain](https://steamcommunity.com/sharedfiles/filedetails/?id=3380210757) 1.2.0 with BepInEx 5.4.x (follow its [install instructions](https://github.com/SeaPower-Modders/AnchorChain)). Use the 1.2.0 preloader (`ACPreloader.zip` from the [V1.2.0 release](https://github.com/SeaPower-Modders/AnchorChain/releases/tag/V1.2.0)); older preloaders and the Anchor Chain (Beta Fix) preloader do not start Anchor Chain 1.2.0 on Sea Power 0.9.0. Enable Anchor Chain and this mod in the in-game Mods menu and restart the game.
+- Sea Power 0.9.0+, [Anchor Chain](https://steamcommunity.com/sharedfiles/filedetails/?id=3380210757) 1.2.0 with BepInEx 5.4.x (follow its [install instructions](https://github.com/SeaPower-Modders/AnchorChain)). Use the 1.2.0 preloader (`ACPreloader.zip` from the [V1.2.0 release](https://github.com/SeaPower-Modders/AnchorChain/releases/tag/V1.2.0)); older preloaders do not start Anchor Chain 1.2.0 on Sea Power 0.9.0. Enable Anchor Chain and this mod in the in-game Mods menu and restart the game.
 - .NET SDK 10 to build from source.
 
 ## Known issues
