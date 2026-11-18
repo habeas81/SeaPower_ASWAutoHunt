@@ -1,17 +1,23 @@
-[h1]ASW Find, Fix and Prosecute (v0.1.1 Beta)[/h1]
+[h1]ASW Find, Fix and Prosecute (v0.1.2 Beta)[/h1]
 
 Pick a pattern, click the map, and your aircraft and helicopters lay out and drop a full sonobuoy field for you, efficiently and without gaps. Share the job with other aircraft and the mod splits the buoys between them. When a buoy detects a submarine, your aircraft fix it with a tight DICASS cluster and can prosecute it.
 
 The mod works out buoy positions from the detection range of the buoys aboard and orders the drops so the aircraft flies an efficient track. It queues them using the game's own sonobuoy drop order.
 
-[b]REQUIRES: Anchor Chain[/b] (Workshop item 3380210757) [b]and, for the Sea Power Public Beta (3D globe map), Anchor Chain (Beta Fix)[/b] (Workshop item 3837690165).
+[b]REQUIRES: Sea Power 0.9.0+ and Anchor Chain 1.2.0[/b] (Workshop item 3380210757).
 [olist]
-[*]Follow the install instructions for the core Anchor Chain mod: https://github.com/SeaPower-Modders/AnchorChain
-[*]Subscribe to Anchor Chain, then also subscribe to [b]Anchor Chain (Beta Fix)[/b]: https://steamcommunity.com/sharedfiles/filedetails/?id=3837690165 and follow the one-time preloader step on its page.
-[*]Enable Anchor Chain (Beta Fix) and this mod in the Mods menu, then restart the game.
+[*]Follow the install instructions for Anchor Chain, including the [b]1.2.0 preloader[/b] (ACPreloader.zip from https://github.com/SeaPower-Modders/AnchorChain/releases). Older preloaders, and the Anchor Chain (Beta Fix) preloader, do not start Anchor Chain 1.2.0 on Sea Power 0.9.0.
+[*]Subscribe to Anchor Chain and this mod.
+[*]Enable Anchor Chain and this mod in the Mods menu, then restart the game.
 [/olist]
 
 [h2]Patch notes[/h2]
+[b]v0.1.2 Beta[/b]
+[list]
+[*][b]Fixed:[/b] updated for Sea Power 0.9.0. Assigning a pattern no longer fails with "Method not found: SetAttackAtWaypointTask".
+[*][b]Fixed:[/b] pattern geometry matches the new 3D globe map in the main game, including at high latitude and across the date line.
+[*][b]Docs:[/b] requires Sea Power 0.9.0+ and Anchor Chain 1.2.0 with its 1.2.0 preloader. Anchor Chain (Beta Fix) is no longer needed.
+[/list]
 [b]v0.1.1 Beta[/b]
 [list]
 [*][b]Fixed:[/b] pattern geometry now uses true great-circle distances, so patterns are laid out correctly with the Public Beta's 3D globe map, including at high latitude and across the date line.
@@ -68,7 +74,7 @@ The mod works out buoy positions from the detection range of the buoys aboard an
 [/list]
 
 [h2]Status[/h2]
-[b]v0.1.1 Beta.[/b] Contact response has only been tested in a few missions, and the "good fix" threshold may need tuning. Please report bugs with your ASWAutoHunt.log attached.
+[b]v0.1.2 Beta.[/b] Contact response has only been tested in a few missions, and the "good fix" threshold may need tuning. Please report bugs with your ASWAutoHunt.log attached.
 [b]Planned:[/b] ship evasion and torpedo defence, and dipping sonar patterns for helicopters.
 
-Compatible with Sea Power 0.8.7+ and the Public Beta (with Anchor Chain (Beta Fix)). MIT licensed. Not affiliated with the developers of Sea Power.
+Compatible with Sea Power 0.9.0+ (Anchor Chain 1.2.0). MIT licensed. Not affiliated with the developers of Sea Power.

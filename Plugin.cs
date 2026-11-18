@@ -18,7 +18,7 @@ namespace ASWAutoHunt
     {
         public const string PLUGIN_GUID = "com.habeas81.seapower.aswautohunt";
         public const string PLUGIN_NAME = "ASW Auto Hunt";
-        public const string PLUGIN_VERSION = "0.1.1";
+        public const string PLUGIN_VERSION = "0.1.2";
 
         // Logger so our patches can print to the BepInEx console/log
         internal static BepInEx.Logging.ManualLogSource Log;

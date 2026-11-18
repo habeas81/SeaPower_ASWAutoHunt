@@ -1,5 +1,6 @@
-[b]v0.1.1 Beta[/b]
+[b]v0.1.2 Beta[/b]
 [list]
-[*]Fixed: sonobuoy patterns now use true great-circle distances, so they lay out correctly with the Public Beta's 3D globe map, including at high latitude and across the date line.
-[*]The Public Beta needs the Anchor Chain (Beta Fix) Workshop item alongside Anchor Chain. See the description for install steps.
+[*]Updated for Sea Power 0.9.0. Fixes the error when assigning a pattern ("Method not found: SetAttackAtWaypointTask") on the new game version.
+[*]Pattern geometry matches the new 3D globe map in the main game, including at high latitude and across the date line.
+[*]Requirements: Sea Power 0.9.0+ and Anchor Chain 1.2.0 with its 1.2.0 preloader. Anchor Chain (Beta Fix) is no longer needed.
 [/list]
