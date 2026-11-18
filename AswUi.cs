@@ -6,6 +6,7 @@ using MapControl;
 using SeaPower;
 using SeapowerUI;
 using SeapowerUI.ViewModels;
+using UniRx;
 using UnityEngine;
 
 namespace ASWAutoHunt
@@ -29,14 +30,15 @@ namespace ASWAutoHunt
             public int Dropped;                                                 // buoys logged as dropped so far
             public GeoPosition LastPos;                                         // previous drop, for leg length
             public int StartAmmo;       // buoys aboard when the (re)queue happened
+            public int DroppedAtQueue;  // Dropped when the (re)queue happened: drops since then already logged = Dropped - this
             public bool Interrupted;    // queue was wiped (e.g. manual waypoint) before the pattern finished
             public float NextCheck;
         }
 
         public static bool CanResume(ObjectBase o) => Plans.TryGetValue(o, out Plan p) && p.Interrupted && p.Points.Count > 0;
 
-        // Same preparation the game's own sonobuoy-line mode does before queuing drops.
-        private static void QueueDrops(ObjectBase src, Plan plan, int count)
+        // Same preparation the game's own sonobuoy-line mode does before queuing drops (or a dip).
+        private static void PrepareQueue(ObjectBase src)
         {
             if (src.CurrentOrder.Value.OrderType != Order.Type.None)
             {
@@ -49,6 +51,29 @@ namespace ASWAutoHunt
             }
 
             src.RemoveWaypoints();
+        }
+
+        // Helicopter contact fix: fly to the point and lower the dipping sonar there (the game's own dip order).
+        public static void QueueDip(ObjectBase src, GeoPosition p)
+        {
+            PrepareQueue(src);
+            src.SetDipSonarAtWaypointTask(p, null);
+        }
+
+        public static bool HasDipQueued(ObjectBase o)
+        {
+            if (o._userRoot == null) return false;
+            foreach (ITaskViewModel tvm in o._userRoot.TaskViewModels)
+            {
+                if (tvm?.Task is GoToWaypointTask g && g.wpName?.value == "dip") return true;
+            }
+
+            return false;
+        }
+
+        private static void QueueDrops(ObjectBase src, Plan plan, int count)
+        {
+            PrepareQueue(src);
             Ammunition ammoObj = src.getAmmunitionByName(plan.Ammo);
             VisualActionTask last = null;
             for (int i = 0; i < count; i++)
@@ -57,6 +82,7 @@ namespace ASWAutoHunt
             }
 
             plan.StartAmmo = src.getAmmunitionAmountByName(plan.Ammo);
+            plan.DroppedAtQueue = plan.Dropped;
             plan.Interrupted = false;
             plan.NextCheck = Time.time + ProgressCheckSec;
         }
@@ -105,6 +131,10 @@ namespace ASWAutoHunt
         private static readonly Dictionary<ObjectBase, Plan> Plans = new Dictionary<ObjectBase, Plan>();
 
         public static bool IsBuoyCarrier(ObjectBase o) => (o is Aircraft || o is Helicopter) && !o.IsDestroyed && PickAmmo(o, out _) > 0;
+
+        // The ASW menu is shown to buoy carriers, and to an aircraft that has used its buoys but still owns a pattern
+        // (so it can share the unassigned points or cancel the pattern).
+        public static bool ShowsAswMenu(ObjectBase o) => IsBuoyCarrier(o) || (o != null && !o.IsDestroyed && Requests.ContainsKey(o));
 
         // Prefer the passive buoy we carry most of; fall back to active-only (DICASS) if that is all there is.
         public static int PickAmmo(ObjectBase o, out string ammoFile)
@@ -166,12 +196,58 @@ namespace ASWAutoHunt
             public GeoPosition? Second;
             public int Dropped;                                              // buoys already placed by earlier versions of this layout
             public readonly HashSet<ObjectBase> Members = new HashSet<ObjectBase>();
+            // Points of the full pattern that no aircraft in the group has buoys for yet (yellow markers). Sharing the
+            // pattern with more aircraft replans the group against the full pattern and assigns them.
+            public readonly List<MarkerDrawing> Pending = new List<MarkerDrawing>();
+            public readonly List<CoverageSource> Placed = new List<CoverageSource>(); // buoys members have dropped for it
         }
+
+        public const DrawingColorPreset PendingColor = DrawingColorPreset.Yellow;
 
         private static readonly Dictionary<ObjectBase, Request> Requests = new Dictionary<ObjectBase, Request>();
 
+        private static void ClearPending(Request r)
+        {
+            MapDrawingLayer layer = DrawingLayerOf();
+            foreach (MarkerDrawing m in r.Pending) layer?.Graphics.Remove(m);
+            r.Pending.Clear();
+        }
+
+        private static void ShowPending(Request r, List<PlannedBuoy> points)
+        {
+            ClearPending(r);
+            MapDrawingLayer layer = DrawingLayerOf();
+            foreach (PlannedBuoy b in points)
+            {
+                MarkerDrawing m = new MarkerDrawing { Location = b.Pos, ColorPreset = PendingColor };
+                layer?.Graphics.Add(m);
+                r.Pending.Add(m);
+            }
+        }
+
+        // Every buoy a member drops is remembered by its request and counted as coverage on any replan. A buoy dropped
+        // seconds earlier can still be falling and not yet show up as a buoy in the water, which let a replan put the
+        // same point back in the plan and drop it twice.
+        private static void RecordPlaced(ObjectBase o, GeoPosition p, string ammo)
+        {
+            foreach (Request r in Requests.Values)
+            {
+                if (r.Members.Contains(o)) r.Placed.Add(new CoverageSource(p, PatternPlanner.EffectiveRadiusNm(ammo)));
+            }
+        }
+
+        // Buoys a finished plan placed still belong to its request's layout (they size it on a later replan).
+        private static void CreditDrops(ObjectBase o, int dropped)
+        {
+            foreach (Request r in Requests.Values)
+            {
+                if (r.Members.Contains(o)) r.Dropped += dropped;
+            }
+        }
+
         public static void Assign(ObjectBase src, PatternKind kind, float widthNm, GeoPosition datum, ObjectBase fleet, float gridHeading = 90f, GeoPosition? second = null)
         {
+            if (Requests.TryGetValue(src, out Request old)) ClearPending(old);
             Request r = new Request { Kind = kind, WidthNm = widthNm, Datum = datum, Fleet = fleet, Heading = gridHeading, Second = second };
             Requests[src] = r;
             Run(src, r);
@@ -190,12 +266,15 @@ namespace ASWAutoHunt
             Run(src, r);
         }
 
-        // Forget finished requests: nobody involved has a plan any more.
+        // Forget finished requests: nobody involved has a plan any more, and no unassigned points are waiting for another
+        // aircraft (those stay until the player cancels the pattern, or the requesting aircraft is lost).
         private static void ReleaseIfIdle()
         {
             foreach (var kv in Requests.ToList())
             {
                 if (kv.Value.Members.Any(m => Plans.ContainsKey(m))) continue;
+                if (kv.Value.Pending.Count > 0 && kv.Key != null && !kv.Key.IsDestroyed) continue;
+                ClearPending(kv.Value);
                 Requests.Remove(kv.Key);
                 Partners.Remove(kv.Key);
             }
@@ -211,25 +290,26 @@ namespace ASWAutoHunt
             GeoPosition? second = req.Second;
             try
             {
-                int have = PickAmmo(src, out string ammo);
-                if (have < 1)
+                // The requesting aircraft may already have used its buoys; its unassigned points then go to the partners.
+                List<ObjectBase> group = new List<ObjectBase>();
+                List<string> ammos = new List<string>();
+                int budget = 0;
+                foreach (ObjectBase m in new[] { src }.Concat(PartnersOf(src)))
+                {
+                    int n = PickAmmo(m, out string ma);
+                    if (n < 1) continue;
+                    group.Add(m);
+                    ammos.Add(ma);
+                    budget += m == src ? Math.Min(n, MaxBuoysPerPattern) : n;
+                }
+
+                if (group.Count == 0)
                 {
                     src.ShowOrderFeedback("No sonobuoys aboard");
                     return;
                 }
 
-                int budget = Math.Min(have, MaxBuoysPerPattern);
-                List<ObjectBase> group = new List<ObjectBase> { src };
-                List<string> ammos = new List<string> { ammo };
-                foreach (ObjectBase p in PartnersOf(src))
-                {
-                    int n = PickAmmo(p, out string pa);
-                    if (n < 1) continue;
-                    group.Add(p);
-                    ammos.Add(pa);
-                    budget += n;
-                }
-
+                string ammo = ammos[0];
                 foreach (ObjectBase g in group) req.Members.Add(g);
                 // Buoys placed by an earlier version of this layout count toward its size; deconfliction then skips them.
                 budget = Math.Min(budget + req.Dropped, MaxBuoysPerPattern * group.Count);
@@ -239,26 +319,35 @@ namespace ASWAutoHunt
                 {
                     if (PatternPlanner.EffectiveRadiusNm(a) < PatternPlanner.EffectiveRadiusNm(ammo)) ammo = a;
                 }
-                List<PlannedBuoy> pattern;
-                if (kind == PatternKind.GridDatum)
+                double cLat = 0, cLon = 0;
+                foreach (ObjectBase g in group)
                 {
-                    pattern = PatternPlanner.GridAtDatum(datum, ammo, budget, gridHeading, PatternPlanner.DistNm(datum, second ?? datum));
+                    cLat += g._geoPosition._latitude;
+                    cLon += g._geoPosition._longitude;
                 }
-                else if (kind == PatternKind.Ring)
+
+                GeoPosition centroid = group.Count == 1 ? group[0]._geoPosition : new GeoPosition(cLat / group.Count, cLon / group.Count);
+                float extentNm = PatternPlanner.DistNm(datum, second ?? datum);
+                PatternPlanner.Route route = kind == PatternKind.GridRoute || kind == PatternKind.Corridor ? RouteOf(fleet) : null;
+                List<PlannedBuoy> Build(int max)
                 {
-                    pattern = PatternPlanner.Ring(datum, PatternPlanner.DistNm(datum, second ?? datum), ammo, budget);
+                    switch (kind)
+                    {
+                        case PatternKind.GridDatum: return PatternPlanner.GridAtDatum(datum, ammo, max, gridHeading, extentNm);
+                        case PatternKind.Ring: return PatternPlanner.Ring(datum, extentNm, ammo, max, centroid);
+                        case PatternKind.Line: return PatternPlanner.Line(datum, second ?? datum, ammo, max);
+                        case PatternKind.GridRoute: return PatternPlanner.GridAlongRoute(route, ammo, max, widthNm);
+                        default: return PatternPlanner.Corridor(route, ammo, widthNm, max);
+                    }
                 }
-                else if (kind == PatternKind.Line)
-                {
-                    pattern = PatternPlanner.Line(datum, second ?? datum, ammo, budget);
-                }
-                else
-                {
-                    PatternPlanner.Route route = RouteOf(fleet);
-                    pattern = kind == PatternKind.GridRoute
-                        ? PatternPlanner.GridAlongRoute(route, ammo, budget, widthNm)
-                        : PatternPlanner.Corridor(route, ammo, widthNm, budget);
-                }
+
+                // What the group's buoys can lay now, and the full pattern regardless of buoys carried. A datum grid placed
+                // without dragging a circle is sized by the buoys alone, so it has no separate full pattern.
+                List<PlannedBuoy> pattern = Build(budget);
+                List<PlannedBuoy> design = kind == PatternKind.GridDatum && extentNm < PatternPlanner.HexSpacingNm(ammo) * 0.5f
+                    ? null
+                    : Build(Math.Max(budget, MaxBuoysPerPattern));
+                if (design != null) PatternPlanner.RemoveLand(design);
 
                 int onLand = PatternPlanner.RemoveLand(pattern);
                 if (onLand > 0)
@@ -273,21 +362,15 @@ namespace ASWAutoHunt
                 }
 
                 // Orient from the group's centroid so the slowest aircraft (given the first points) start near the near end.
-                double cLat = 0, cLon = 0;
-                foreach (ObjectBase g in group)
-                {
-                    cLat += g._geoPosition._latitude;
-                    cLon += g._geoPosition._longitude;
-                }
-
-                GeoPosition centroid = group.Count == 1 ? src._geoPosition : new GeoPosition(cLat / group.Count, cLon / group.Count);
                 PatternPlanner.OrientFor(pattern, centroid);
                 int before = pattern.Count;
                 List<CoverageSource> existing = CoverageSources(src, group, out int nWater, out int nQueued);
+                existing.AddRange(req.Placed);
                 pattern = Deconflict(pattern, existing, ammo);
                 int skipped = before - pattern.Count;
                 if (pattern.Count == 0)
                 {
+                    UpdatePending(req, design, existing, ammo, null, ammos);
                     src.ShowOrderFeedback("Area already covered by existing or queued buoys");
                     ModLog.Event($"ASW pattern skipped: {src.getUIDAndName()} fully covered (water={nWater} queued={nQueued})");
                     return;
@@ -320,6 +403,12 @@ namespace ASWAutoHunt
                     }
                 }
 
+                int unassigned = UpdatePending(req, design, existing, ammo, shares, ammos);
+                if (unassigned > 0)
+                {
+                    ModLog.Event($"  unassigned: {unassigned} points of the full pattern need more buoys (yellow markers)");
+                }
+
                 for (int i = 0; i < group.Count; i++)
                 {
                     Cancel(group[i], silent: true);
@@ -330,6 +419,7 @@ namespace ASWAutoHunt
                     }
 
                     string extra = i == 0 && skipped > 0 ? $" ({skipped} skipped, already covered)" : "";
+                    if (i == 0 && unassigned > 0) extra += $", {unassigned} unassigned";
                     string who = group.Count > 1 ? $" [share {shares[i].Count}/{pattern.Count}, {group.Count} aircraft]" : "";
                     Launch(group[i], ammos[i], shares[i]);
                     group[i].ShowOrderFeedback($"ASW pattern: {desc}, {shares[i].Count} buoys{extra}{who}, spacing {(barrier ? PatternPlanner.BarrierSpacingNm(ammo) : PatternPlanner.HexSpacingNm(ammo)):0.0} nm");
@@ -339,6 +429,32 @@ namespace ASWAutoHunt
             {
                 ModLog.Error("Assign", ex);
             }
+        }
+
+        // Marks the points of the full pattern that are neither assigned to an aircraft in the group nor already covered by
+        // a friendly buoy in the water or queued (same coverage rule as deconfliction). Returns how many are left.
+        private static int UpdatePending(Request req, List<PlannedBuoy> design, List<CoverageSource> existing, string ammo,
+            List<List<PlannedBuoy>> shares, List<string> ammos)
+        {
+            if (design == null)
+            {
+                ClearPending(req);
+                return 0;
+            }
+
+            List<CoverageSource> covered = new List<CoverageSource>(existing);
+            if (shares != null)
+            {
+                for (int i = 0; i < shares.Count; i++)
+                {
+                    float r = PatternPlanner.EffectiveRadiusNm(ammos[i]);
+                    foreach (PlannedBuoy b in shares[i]) covered.Add(new CoverageSource(b.Pos, r));
+                }
+            }
+
+            List<PlannedBuoy> pending = Deconflict(design, covered, ammo);
+            ShowPending(req, pending);
+            return pending.Count;
         }
 
         // Queues one aircraft's share, draws its markers and logs the planned order with leg lengths.
@@ -410,11 +526,12 @@ namespace ASWAutoHunt
             if (!Partners.TryGetValue(src, out var s)) Partners[src] = s = new HashSet<ObjectBase>();
             if (!Excluded.TryGetValue(src, out var ex)) Excluded[src] = ex = new HashSet<ObjectBase>();
             bool wasOn = IsPartner(src, o);
+            bool replannedByCancel = wasOn && Requests.TryGetValue(src, out Request r) && r.Members.Contains(o);
             if (wasOn)
             {
                 s.Remove(o);
                 ex.Add(o);
-                Cancel(o, silent: false);
+                Cancel(o, silent: false); // re-plans src's pattern without o when o was part of it
             }
             else
             {
@@ -424,7 +541,7 @@ namespace ASWAutoHunt
             }
 
             src.ShowOrderFeedback($"ASW coordination: {PartnersOf(src).Count()} other aircraft share the pattern");
-            if (Requests.ContainsKey(src)) Replan(src);
+            if (Requests.ContainsKey(src) && !replannedByCancel) Replan(src);
         }
 
         private static void JoinFormation(ObjectBase src, ObjectBase o)
@@ -597,6 +714,27 @@ namespace ASWAutoHunt
 
         public static void Cancel(ObjectBase src, bool silent = false)
         {
+            // A player cancel releases the aircraft completely: it is no longer auto-tasked against contacts, and any
+            // contact hunt in progress is stopped (silent cancels are internal replans and keep the aircraft a hunter).
+            // A member (not the requester) leaving a shared pattern: take it out of the group, and re-plan the other
+            // aircraft afterwards so its unplaced points are redistributed and their routes re-optimised.
+            List<ObjectBase> regroup = new List<ObjectBase>();
+            if (!silent)
+            {
+                Hunters.Remove(src);
+                ContactResponse.Release(src, "ASW ended by player");
+                foreach (var kv in Requests.ToList())
+                {
+                    if (kv.Key == src || !kv.Value.Members.Contains(src)) continue;
+                    if (Plans.TryGetValue(src, out Plan leaving)) kv.Value.Dropped += leaving.Dropped;
+                    kv.Value.Members.Remove(src);
+                    if (Partners.TryGetValue(kv.Key, out var s)) s.Remove(src);
+                    if (!Excluded.TryGetValue(kv.Key, out var ex)) Excluded[kv.Key] = ex = new HashSet<ObjectBase>();
+                    ex.Add(src);
+                    regroup.Add(kv.Key);
+                }
+            }
+
             if (Plans.TryGetValue(src, out Plan plan))
             {
                 ClearMarkers(plan, plan.Markers.Count);
@@ -611,6 +749,7 @@ namespace ASWAutoHunt
             // A manual cancel on the requester ends the whole shared pattern.
             if (!silent && Requests.TryGetValue(src, out Request req))
             {
+                    ClearPending(req);
                     Requests.Remove(src);
                     foreach (ObjectBase m in req.Members.ToList())
                     {
@@ -618,6 +757,15 @@ namespace ASWAutoHunt
                     }
 
                     ClearPartners(src);
+            }
+
+            foreach (ObjectBase requester in regroup)
+            {
+                if (Requests.ContainsKey(requester))
+                {
+                    ModLog.Event($"ASW: {src.getUIDAndName()} left the shared pattern of {requester.getUIDAndName()}; re-planning the rest");
+                    Replan(requester);
+                }
             }
         }
 
@@ -630,6 +778,7 @@ namespace ASWAutoHunt
                 GeoPosition p = plan.Points[i];
                 float leg = PatternPlanner.DistNm(plan.LastPos, p);
                 plan.Dropped++;
+                RecordPlaced(o, p, plan.Ammo);
                 ModLog.Event($"  drop {o.getUIDAndName()} #{plan.Dropped} {plan.Tags[i]} leg={leg:0.0}nm acft_to_point={PatternPlanner.DistNm(o._geoPosition, p):0.0}nm lat={p._latitude:0.000} lon={p._longitude:0.000}");
                 plan.LastPos = p;
             }
@@ -709,13 +858,15 @@ namespace ASWAutoHunt
 
                 if (remaining == 0)
                 {
-                    // Queue empty: finished, or wiped by another order. Ammo used tells which.
-                    int used = plan.StartAmmo - o.getAmmunitionAmountByName(plan.Ammo);
+                    // Queue empty: finished, or wiped by another order. Ammo used since the queue was set, less the drops
+                    // already logged from it, tells which (and how many more were dropped).
+                    int used = plan.StartAmmo - o.getAmmunitionAmountByName(plan.Ammo) - (plan.Dropped - plan.DroppedAtQueue);
                     if (used >= plan.Points.Count)
                     {
                         LogDrops(o, plan, plan.Points.Count);
                         ModLog.Event($"ASW pattern complete: {o.getUIDAndName()} dropped={plan.Dropped}");
                         ClearMarkers(plan, plan.Markers.Count);
+                        CreditDrops(o, plan.Dropped);
                         Plans.Remove(o);
                         ReleaseIfIdle();
                         return;
@@ -916,6 +1067,34 @@ namespace ASWAutoHunt
             return items;
         }
 
+        // Auto-prosecute follows the weapons status (Free attacks, Tight fixes only, Hold does nothing), so this one item
+        // shows "Disable" while weapons are free and "Enable" otherwise, and sets the status the same way the game's own
+        // weapons-status buttons do. The bottom-bar menu is built once per selection, so there it also follows status
+        // changes made elsewhere.
+        private static ContextMenuItem ProsecuteToggle(ObjectBase o, bool followStatus)
+        {
+            ContextMenuItem item = null;
+            string Label() => o._weaponStatus == ObjectBase.WeaponStatus.Free ? "Disable ASW Prosecute" : "Enable ASW Prosecute";
+            item = new ContextMenuItem(Label(), null, new DelegateCommand(_ =>
+            {
+                bool enable = o._weaponStatus != ObjectBase.WeaponStatus.Free;
+                o.SetWeaponStatus(enable ? ObjectBase.WeaponStatus.Free : ObjectBase.WeaponStatus.Tight, formationCheck: true);
+                o.ShowOrderFeedback(enable ? "ASW Prosecute On" : "ASW Prosecute Off");
+                // Using the toggle opts the aircraft into contact response even without a pattern (Cancel ASW pattern
+                // releases it again).
+                bool added = AswPlanner.Hunters.Add(o);
+                ModLog.Event($"ASW prosecute {(enable ? "enabled" : "disabled")}: {o.getUIDAndName()} weapons={o._weaponStatus}{(added ? " (now an ASW hunter)" : "")}");
+                item.Label = Label();
+            }));
+
+            if (followStatus)
+            {
+                o.WeaponState?.Subscribe(_ => item.Label = Label());
+            }
+
+            return item;
+        }
+
         // Shared by the context menu and the bottom bar. Partner entries relabel themselves so a static bar menu stays current.
         public static TrulyObservableCollection<ContextMenuItem> BuildMenu(ObjectBase o, bool alwaysResume)
         {
@@ -955,6 +1134,7 @@ namespace ASWAutoHunt
                 sub.Add(new ContextMenuItem("Share with...", partners));
             }
 
+            sub.Add(ProsecuteToggle(o, alwaysResume));
             sub.Add(new ContextMenuItem("Cancel ASW pattern", null, new DelegateCommand(_ => AswPlanner.Cancel(o))));
             return sub;
         }
@@ -964,7 +1144,7 @@ namespace ASWAutoHunt
             try
             {
                 ObjectBase o = ____objectBase;
-                if (o == null || __result == null || !(o.IsPlayerObject || Globals.AllowControlOfEnemyUnits.Value) || !AswPlanner.IsBuoyCarrier(o))
+                if (o == null || __result == null || !(o.IsPlayerObject || Globals.AllowControlOfEnemyUnits.Value) || !AswPlanner.ShowsAswMenu(o))
                 {
                     return;
                 }
@@ -986,7 +1166,7 @@ namespace ASWAutoHunt
         {
             try
             {
-                if (isWaypointEdit || objectBase == null || !(objectBase.IsPlayerObject || Globals.AllowControlOfEnemyUnits.Value) || !AswPlanner.IsBuoyCarrier(objectBase))
+                if (isWaypointEdit || objectBase == null || !(objectBase.IsPlayerObject || Globals.AllowControlOfEnemyUnits.Value) || !AswPlanner.ShowsAswMenu(objectBase))
                 {
                     return;
                 }

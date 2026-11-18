@@ -18,7 +18,7 @@ namespace ASWAutoHunt
     {
         public const string PLUGIN_GUID = "com.habeas81.seapower.aswautohunt";
         public const string PLUGIN_NAME = "ASW Auto Hunt";
-        public const string PLUGIN_VERSION = "0.1.2";
+        public const string PLUGIN_VERSION = "0.1.3";
 
         // Logger so our patches can print to the BepInEx console/log
         internal static BepInEx.Logging.ManualLogSource Log;
@@ -72,12 +72,19 @@ namespace ASWAutoHunt
             Perf.Init(harmony, ReadPerfConfig());
         }
 
-        // Opt-in profiler switch: BepInEx\config\<plugin guid>.cfg, [Logging] PerfMonitor (default false).
+        // Settings in BepInEx\config\<plugin guid>.cfg: [Patterns] BuoyRangeFactor, and the opt-in profiler switch
+        // [Logging] PerfMonitor (default false), which is returned.
         private static bool ReadPerfConfig()
         {
             try
             {
                 var cfg = new BepInEx.Configuration.ConfigFile(System.IO.Path.Combine(BepInEx.Paths.ConfigPath, PLUGIN_GUID + ".cfg"), true);
+                float factor = cfg.Bind("Patterns", "BuoyRangeFactor", 1.0f,
+                    "Fraction of each sonobuoy's nominal detection range (from the game's sensors.ini) used to space patterns and to judge fix coverage. " +
+                    "1.0 = full range: neighbouring detection circles only just overlap, so the buoys carried cover the most area. " +
+                    "Lower (e.g. 0.6) packs buoys closer, for quiet targets. Range 0.3 to 1.5.").Value;
+                PatternPlanner.EffectiveRangeFactor = Math.Max(0.3f, Math.Min(1.5f, factor));
+                ModLog.Info($"Buoy range factor: {PatternPlanner.EffectiveRangeFactor:0.00}");
                 return cfg.Bind("Logging", "PerfMonitor", false,
                     "Time every patch method and log a PERF summary every 30 s (frame times, GC, slowest patches). Small overhead; use to find lag.").Value;
             }

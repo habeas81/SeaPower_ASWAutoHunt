@@ -22,7 +22,9 @@ namespace ASWAutoHunt
     public static class PatternPlanner
     {
         // ---- Tunables ----
-        public const float EffectiveRangeFactor = 0.6f;   // fraction of nominal buoy range assumed against a quiet target
+        // Fraction of each buoy's nominal detection range (sensors.ini) that layouts are planned on. 1.0 = the full range, so
+        // neighbouring detection circles only just overlap; lower it to plan for quieter targets. Set from the config file.
+        public static float EffectiveRangeFactor = 1.0f;
         public const float HexSpacingFactor = 1.732f;     // sqrt(3): gap-free hexagonal area coverage
         public const float BarrierSpacingFactor = 1.8f;   // spacing along a barrier line, in effective radii
         public const float MinSpacingNm = 2.5f;
@@ -31,9 +33,10 @@ namespace ASWAutoHunt
 
         public const float GridRouteHalfWidthNm = 12f;    // swath half-width for "grid along route"
         public const float GridLeadNm = 5f;               // start the swath this far ahead of the fleet so buoys are down before it arrives
+        public const float GridRouteLengthNm = 80f;       // full length of a grid along route (what more aircraft would complete)
         public const float CorridorLeadNm = 5f;
         public const float LandHeightM = 1f;              // terrain higher than this above sea level counts as land
-        public const float CorridorLengthNm = 80f;        // maximum length of the screen; shortened to fit the buoys carried
+        public const float CorridorLengthPerWidth = 2f;   // full corridor length = this x its width (20 nm wide -> 40 nm long); shortened to fit the buoys carried
         public const int CorridorCentrelineEvery = 2;     // centreline buoy at every Nth station (sparser than the walls)
         public const bool CorridorEndCap = true;
         public const float MaxChunkNm = 40f;              // longest single chunk along the track
@@ -52,6 +55,8 @@ namespace ASWAutoHunt
             if (n.Contains("ssq-77")) return 20f;
             if (n.Contains("ssq-62")) return 8f;
             if (n.Contains("ssq-53")) return 10f;
+            if (n.Contains("ssq-47")) return 4f;
+            if (n.Contains("ssq-41")) return 4f;
             return DefaultNominalKm;
         }
 
@@ -202,14 +207,17 @@ namespace ASWAutoHunt
                 rows.Add(row);
             }
 
-            // Too many for the buoys carried: drop the points farthest from the centre.
+            // Too many for the buoys carried: keep exactly maxBuoys, the points nearest the centre (ties broken by row order,
+            // so lattice points at equal distance cannot push the count over the buoys carried).
             int total = rows.Sum(x => x.Count);
             if (total > maxBuoys)
             {
-                float cut = rows.SelectMany(x => x).Select(p => p.along * p.along + p.stack * p.stack).OrderBy(v => v).ElementAt(maxBuoys - 1);
+                var keep = new HashSet<(float, float)>(rows.SelectMany(x => x)
+                    .OrderBy(p => p.along * p.along + p.stack * p.stack).ThenBy(p => p.stack).ThenBy(p => p.along)
+                    .Take(maxBuoys));
                 foreach (var row in rows)
                 {
-                    row.RemoveAll(p => p.along * p.along + p.stack * p.stack > cut);
+                    row.RemoveAll(p => !keep.Contains(p));
                 }
             }
 
@@ -235,11 +243,15 @@ namespace ASWAutoHunt
             return res;
         }
 
-        // Stations per chunk: thirds of the pattern, but no chunk longer than MaxChunkNm along the track.
-        private static int ChunkSize(int stations, float stationSpacingNm)
+        // Stations per chunk: thirds of the pattern, but no chunk longer than MaxChunkNm along the track, and none shorter
+        // than the pattern is wide: every chunk costs cross-legs of about the width, so short chunks on a short or narrow
+        // pattern turn it into a zig-zag instead of flying the walls.
+        private static int ChunkSize(int stations, float stationSpacingNm, float widthNm)
         {
             int perChunk = (int)Math.Ceiling(stations / (double)Math.Min(Chunks, stations));
-            return Math.Max(1, Math.Min(perChunk, (int)Math.Floor(MaxChunkNm / stationSpacingNm)));
+            perChunk = Math.Min(perChunk, (int)Math.Floor(MaxChunkNm / stationSpacingNm));
+            perChunk = Math.Max(perChunk, (int)Math.Ceiling(widthNm / stationSpacingNm));
+            return Math.Max(1, Math.Min(perChunk, stations));
         }
 
         // Hexagonal swath centred on the route, starting GridLeadNm ahead of the fleet. Running out of buoys shortens the
@@ -258,7 +270,8 @@ namespace ASWAutoHunt
 
             // Lattice cell (station, line) is occupied when (station + line) is even.
             int stations = 0, used = 0;
-            for (int st = 0; st < 400 && GridLeadNm + st * stepNm <= route.LengthNm + GridLeadNm + 2f * d; st++)
+            float maxAlongNm = Math.Min(route.LengthNm + 2f * d, GridRouteLengthNm);
+            for (int st = 0; st < 400 && st * stepNm <= maxAlongNm; st++)
             {
                 int need = 0;
                 for (int k = 0; k < lines; k++) if (((k + st) & 1) == 0) need++;
@@ -269,7 +282,7 @@ namespace ASWAutoHunt
 
             if (stations == 0) return res;
 
-            int perChunk = ChunkSize(stations, stepNm);
+            int perChunk = ChunkSize(stations, stepNm, 2f * halfWidthNm);
             for (int first = 0; first < stations; first += perChunk)
             {
                 int last = Math.Min(first + perChunk, stations) - 1;
@@ -309,7 +322,7 @@ namespace ASWAutoHunt
 
             // Interior end-cap points between the walls.
             int capN = CorridorEndCap ? Math.Max(0, (int)Math.Ceiling(widthNm / sp) - 1) : 0;
-            int maxStations = (int)Math.Floor(CorridorLengthNm / sp) + 1;
+            int maxStations = (int)Math.Floor(CorridorLengthPerWidth * widthNm / sp) + 1;
             // First decide how many stations the buoy budget allows (walls every station, centreline every Nth).
             int stations = 0, used = 0;
             for (int st = 0; st < maxStations; st++)
@@ -324,7 +337,7 @@ namespace ASWAutoHunt
 
             // Fly it in chunks (thirds of the corridor): up one wall, across the lane, back down the other wall, then up the
             // middle laying the centreline buoys; the aircraft ends the chunk at the far end, ready for the next chunk.
-            int perChunk = ChunkSize(stations, sp);
+            int perChunk = ChunkSize(stations, sp, widthNm);
             for (int first = 0; first < stations; first += perChunk)
             {
                 int last = Math.Min(first + perChunk, stations) - 1;
@@ -373,40 +386,55 @@ namespace ASWAutoHunt
             return res;
         }
 
-        // Ring of radius radiusNm around a datum: outer ring at barrier spacing (stretched if the buoys cannot cover it),
-        // then concentric infill rings stepped inwards at hex row spacing, then a centre buoy if the middle is still open.
-        public static List<PlannedBuoy> Ring(GeoPosition centre, float radiusNm, string ammoFile, int maxBuoys)
+        // Ring of radius radiusNm around a datum: outer ring at barrier spacing, then the remaining buoys as a hex infill
+        // inside it. If they cannot fill the whole interior, the infill is kept around the centre (the datum is the most
+        // likely position). The infill is flown row by row, starting from the side nearer the point where the ring ends.
+        // If the buoys cannot close the ring, they are laid at full spacing on the arc nearest `near` (the aircraft),
+        // and the rest of the ring is left for other aircraft.
+        public static List<PlannedBuoy> Ring(GeoPosition centre, float radiusNm, string ammoFile, int maxBuoys, GeoPosition near)
         {
             List<PlannedBuoy> res = new List<PlannedBuoy>();
-            if (maxBuoys < 3 || radiusNm < 1f) return res;
+            if (maxBuoys < 1 || radiusNm < 1f) return res;
             float sp = BarrierSpacingNm(ammoFile);
-            float step = HexSpacingNm(ammoFile) * 0.866f;
-            float r = radiusNm;
-            bool outer = true;
-            float startAngle = 0f;
-            while (r > step * 0.6f && res.Count < maxBuoys)
+            float d = HexSpacingNm(ammoFile);
+            float rowStep = d * 0.866f;
+
+            int n = Math.Max(3, (int)Math.Ceiling(2f * Math.PI * radiusNm / sp));
+            float step = 360f / n;
+            if (maxBuoys < n)
             {
-                int n = Math.Max(3, (int)Math.Ceiling(2f * Math.PI * r / (outer ? sp : HexSpacingNm(ammoFile))));
-                if (res.Count + n > maxBuoys)
+                int first = (int)Math.Round(centre.HeadingToPosition(near) / step) - maxBuoys / 2;
+                for (int i = 0; i < maxBuoys; i++)
                 {
-                    if (outer) n = maxBuoys; // stretch the outer ring rather than leave it open
-                    else break;
+                    res.Add(new PlannedBuoy { Pos = centre.GeoOffsetByDistanceOnHeading(radiusNm, (first + i) * step), Tag = "O" });
                 }
 
-                for (int i = 0; i < n; i++)
-                {
-                    float ang = startAngle + i * 360f / n;
-                    res.Add(new PlannedBuoy { Pos = centre.GeoOffsetByDistanceOnHeading(r, ang), Tag = outer ? "O" : "I" });
-                }
-
-                outer = false;
-                startAngle += 180f / Math.Max(3, res.Count); // small stagger between rings
-                r -= step;
+                return res;
             }
 
-            if (r >= 0f && r < step * 0.6f && !outer && res.Count < maxBuoys && radiusNm > step)
+            for (int i = 0; i < n; i++)
             {
-                res.Add(new PlannedBuoy { Pos = centre, Tag = "C" });
+                res.Add(new PlannedBuoy { Pos = centre.GeoOffsetByDistanceOnHeading(radiusNm, i * step), Tag = "O" });
+            }
+
+            int left = maxBuoys - n;
+            if (left < 1) return res;
+
+            // Keep the infill about one hex row inside the ring so it does not double up on the ring buoys.
+            float innerR = radiusNm - rowStep;
+            List<PlannedBuoy> infill = innerR >= d * 0.5f
+                ? GridInCircle(centre, d, rowStep, left, 90f, innerR)
+                : new List<PlannedBuoy> { new PlannedBuoy { Pos = centre } };
+
+            GeoPosition ringEnd = res[res.Count - 1].Pos;
+            if (infill.Count > 1 && DistNm(ringEnd, infill[infill.Count - 1].Pos) < DistNm(ringEnd, infill[0].Pos))
+            {
+                infill.Reverse();
+            }
+
+            foreach (PlannedBuoy b in infill)
+            {
+                res.Add(new PlannedBuoy { Pos = b.Pos, Tag = "I" });
             }
 
             return res;

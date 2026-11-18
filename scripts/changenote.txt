@@ -1,6 +1,15 @@
-[b]v0.1.2 Beta[/b]
+[b]v0.1.3 Beta[/b]
 [list]
-[*]Updated for Sea Power 0.9.0. Fixes the error when assigning a pattern ("Method not found: SetAttackAtWaypointTask") on the new game version.
-[*]Pattern geometry matches the new 3D globe map in the main game, including at high latitude and across the date line.
-[*]Requirements: Sea Power 0.9.0+ and Anchor Chain 1.2.0 with its 1.2.0 preloader. Anchor Chain (Beta Fix) is no longer needed.
+[*]New: weapons status controls contact response. Weapons Free: fix and attack hostile subs. Weapons Tight: fix only. Weapons Hold: no response. "Enable / Disable ASW Prosecute" in the ASW menu switches it, and also lets an aircraft without a pattern respond to contacts.
+[*]New: helicopters with a dipping sonar fix contacts by dipping (no DICASS needed).
+[*]New: the quickest aircraft to arrive takes each contact, and contacts are worked in order of threat to your ships (line of sight, land checked). Already well-fixed hostile subs are attacked directly.
+[*]New: an aircraft is sent once the contact's uncertainty ellipse fits what its DICASS or dipping sonar can cover, and passive buoy solutions are now acted on.
+[*]New: map labels show each ASW aircraft's status (Searching, Fixing, Dipping, Prosecuting, Ready, Hold).
+[*]New: points of a pattern your aircraft have no buoys for show as yellow markers. Share the pattern with more aircraft to assign them.
+[*]Changed: buoy spacing uses each buoy's full detection range, so circles only just overlap (BuoyRangeFactor in the config file to tune). SSQ-41 and SSQ-47 now use their real 4 km range.
+[*]Changed: a corridor is twice as long as it is wide. Ring with infill now fills the interior, and lays the nearest arc first when buoys run short. Small and narrow patterns fly their borders instead of zig-zagging.
+[*]Fixed: "Cancel ASW pattern" now fully releases the aircraft (helicopters could ignore return-to-base or other orders afterwards).
+[*]Fixed: an aircraft leaving a shared pattern now re-plans the others; sharing no longer drops a second buoy on a point just dropped.
+[*]Fixed: an interrupted pattern no longer loses undropped buoys when it resumes.
+[*]Log: detections, classification changes, why no aircraft responds, assignments and every ASW weapon release.
 [/list]
